@@ -5,7 +5,7 @@ from sklearn.impute import SimpleImputer
 from consts import DATA_DIR, BOTS
 
 
-def impute_missing_with_empty_string(df, columns):
+def impute_missing_with_empty_string(df, columns) -> pd.DataFrame:
     """
     Imputes missing values in the specified column with an empty string.
     Args:
@@ -22,7 +22,7 @@ def impute_missing_with_empty_string(df, columns):
     return df
 
 
-def merge_with_games(df, games_df):
+def merge_with_games(df, games_df) -> pd.DataFrame:
     """
     Merge with games_df on 'game_id'.
     Args:
@@ -35,7 +35,7 @@ def merge_with_games(df, games_df):
     return df.merge(games_df, on='game_id', how='left')
 
 
-def add_casual_only_flag(df):
+def add_casual_only_flag(df) -> pd.DataFrame:
     """
     Adds a binary flag indicating whether a player has only played casual games.
     Args:
@@ -53,7 +53,7 @@ def add_casual_only_flag(df):
     return df
 
 
-def add_board_letters_used(df, turns_df):
+def add_board_letters_used(df, turns_df) -> pd.DataFrame:
     """
     Adds a feature for each game and player indicating the total number of letters he used on the board (so not from his rack).
     These letters are calculated from the 'move' column in turns_df, and are indicated by lowercase letters and '.'s.
@@ -75,7 +75,7 @@ def add_board_letters_used(df, turns_df):
     return df
 
 
-def add_points_per_game_stats(df, turns_df):
+def add_points_per_game_stats(df, turns_df) -> pd.DataFrame:
     """
     Adds features for player points per game (min, max, avg).
     Calculates statistics from the turns_df and merges them into the
@@ -97,7 +97,7 @@ def add_points_per_game_stats(df, turns_df):
     df = df.merge(player_game_stats, on=['game_id', 'nickname'], how='left')
     return df
 
-def add_bot_type(df):
+def add_bot_type(df) -> pd.DataFrame:
     """
     Adds a one hot encoded feature for bot type.
     """
