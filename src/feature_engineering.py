@@ -1,10 +1,35 @@
 from typing import List, Tuple
+from pathlib import Path
+
 import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
 from consts import DATA_DIR, BOTS
+
+def add_ohe_to_df(df: pd.DataFrame, col_name: str,drop_original: bool = True) -> pd.DataFrame:
+    """
+    Adds one hot encoded features for the specified column.
+    Args:
+        df (pd.DataFrame): Input dataframe.
+        col_name (str): Column name to one hot encode.
+    Returns:
+        pd.DataFrame: Dataframe with one hot encoded features.
+    """
+    df = df.copy()
+    if col_name not in df.columns:
+        raise ValueError(f"Column '{col_name}' not found in dataframe.")
+    ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+    ohe_features = ohe.fit_transform(df[[col_name]])
+    ohe_df = pd.DataFrame(
+        ohe_features,
+        columns=[f'{col_name}_{cat}' for cat in ohe.categories_[0]],
+        index=df.index
+    )
+    df = pd.concat([df, ohe_df], axis=1)
+    df.drop(columns=[col_name], inplace=True)
+    return df
 
 
 def impute_missing_with_empty_string(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
@@ -108,22 +133,14 @@ def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
     bot_rows = df[df['nickname'].isin(BOTS)]
     bot_map = bot_rows.set_index('game_id')['nickname']
     df.loc[:, 'opponent_bot'] = df['game_id'].map(bot_map)
-    ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-    bot_ohe = ohe.fit_transform(df[['opponent_bot']])
-    bot_ohe_df = pd.DataFrame(
-        bot_ohe,
-        columns=[f'bot_type_{cat}' for cat in ohe.categories_[0]],
-        index=df.index
-    )
-    df = pd.concat([df, bot_ohe_df], axis=1)
-    df.drop(columns=['opponent_bot'], inplace=True)
+    df = add_ohe_to_df(df, 'opponent_bot')
     return df
 
 
 def add_time_related_features(df: pd.DataFrame, timestamp_col='created_at') -> pd.DataFrame:
     """
     Adds time-related features extracted from the timestamp_col column.
-    Features added: 'hour_of_day', 'day_of_week', 'is_weekend'.
+    Features added: 'hour_of_day', 'day_of_week', 'is_weekend', 'time_of_day'.
     Args:
         df (pd.DataFrame): Input dataframe with timestamp_col column.
         timestamp_col (str): Name of the timestamp column.
@@ -138,9 +155,26 @@ def add_time_related_features(df: pd.DataFrame, timestamp_col='created_at') -> p
     df['hour_of_day'] = df[timestamp_col].dt.hour
     df['is_weekend'] = df['day_of_week'].isin(['Saturday', 'Sunday'])
     df['is_weekend'] = df['is_weekend'].astype(int)
+    df['time_of_day'] = pd.cut(
+        df['hour_of_day'],
+        bins=[-1, 5, 11, 17, 21, 24],
+        labels=['early_morning', 'morning', 'afternoon', 'evening', 'night']
+    )
+    df = add_ohe_to_df(df, 'time_of_day')
     return df
 
-
+def add_game_variant_feature(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds one hot encoded features for a new game_variant feature: f'{Lexicon} - {time_control_name}'
+    Args:
+        df (pd.DataFrame): Input dataframe with 'lexicon' and 'time_control_name' columns.
+    Return:
+        pd.DataFrame: Dataframe with new one hot encoded game_variant features.
+    """
+    df = df.copy()
+    df['game_variant'] = df['lexicon'] + ' - ' + df['time_control_name']
+    df = add_ohe_to_df(df, 'game_variant')
+    return df
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline.
@@ -167,6 +201,21 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
     return pipeline, turns_df
 
 
+def save_processed_file(df: pd.DataFrame, path: str):
+    """
+    Saves the processed dataframe to a CSV file, creating directories if they do not exist.
+    Args:
+        df (pd.DataFrame): Dataframe to save.
+        path (str): Path to save the CSV file (including filename).
+    """
+    try:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_path, index=False)
+    except Exception as e:
+        print(f"Error saving file to {path}: {e}")
+
+
 def main():
     """
     Main function that runs the feature engineering pipeline on training and test datasets, and saves the results to CSV files.
@@ -185,7 +234,7 @@ def main():
     print(f'{'-'*20} test_df_fe head {'-'*20}')
     print(test_df_fe.head())
 
-
-
+    save_processed_file(train_df_fe, DATA_DIR / 'processed' / 'train_fe.csv')
+    save_processed_file(test_df_fe, DATA_DIR / 'processed' / 'test_fe.csv')
 if __name__ == "__main__":
     main()
