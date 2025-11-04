@@ -1,3 +1,4 @@
+import numpy as np
 from typing import List, Tuple
 from pathlib import Path
 
@@ -88,6 +89,7 @@ def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataF
     """
     Adds a feature for each game and player indicating the total number of letters he used on the board (so not from his rack).
     These letters are calculated from the 'move' column in turns_df, and are indicated by lowercase letters and '.'s.
+    This calculation is ONLY performed for turns where turn_type == 'Play'.
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
         turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'move' columns.
@@ -96,13 +98,20 @@ def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataF
     """
     df = df.copy()
     turns_df = turns_df.copy()
-    turns_df['board_letters_used'] = turns_df['move'].apply(
-        lambda x: str(x).count(".") + sum(int(c.islower()) for c in str(x)))
+
+    mask = turns_df['turn_type'] == 'Play'
+    turns_df['board_letters_used'] = 0
+    turns_df.loc[mask, 'board_letters_used'] = turns_df.loc[mask, 'move'].apply(
+        lambda x: str(x).count(".") + sum(int(c.islower()) for c in str(x))
+    )
     player_board_letters = turns_df.groupby(['game_id', 'nickname'])[
         'board_letters_used'].sum().reset_index()
     player_board_letters.rename(
         columns={'board_letters_used': 'total_board_letters_used'}, inplace=True)
     df = df.merge(player_board_letters, on=['game_id', 'nickname'], how='left')
+
+    df['total_board_letters_used'] = df['total_board_letters_used'].fillna(
+        0).astype(int)
     return df
 
 
@@ -123,7 +132,9 @@ def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Da
     player_game_stats = turns_df.groupby(['game_id', 'nickname'])['points'].agg(
         avg_points_per_game='mean',
         min_points_per_game='min',
-        max_points_per_game='max'
+        max_points_per_game='max',
+        median_points_per_game='median',
+        std_points_per_game='std'
     ).reset_index()
     df = df.merge(player_game_stats, on=['game_id', 'nickname'], how='left')
     return df
@@ -212,6 +223,126 @@ def add_bingo_proxy_feature(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Data
     return df
 
 
+def add_turn_type_counts(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds features for counts of different turn types per player per game.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'turn_type' columns.
+    Returns:
+    df (pd.DataFrame): Dataframe with new columns for each turn type count.
+    """
+    df = df.copy()
+    turn_type_counts = turns_df.pivot_table(
+        index=['game_id', 'nickname'],
+        columns='turn_type',
+        aggfunc='size',
+        fill_value=0
+    ).reset_index()
+
+    turn_type_counts.columns.name = None
+    turn_type_counts = turn_type_counts.add_prefix('turn_count_')
+    turn_type_counts.rename(columns={
+        'turn_count_game_id': 'game_id',
+        'turn_count_nickname': 'nickname'
+    }, inplace=True)
+    df = df.merge(turn_type_counts, on=['game_id', 'nickname'], how='left')
+    return df
+
+
+def add_overall_player_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds overall player statistics:
+    - Total games played
+    - min,max,std,avg points per all games played
+    Args:
+        df (pd.DataFrame): Input dataframe with 'nickname' column.
+        turns_df (pd.DataFrame): Turns dataframe with 'nickname' and 'points' columns.
+    Returns:
+        pd.DataFrame: Dataframe with new overall player statistics features.
+    """
+    df = df.copy()
+    overall_stats = turns_df.groupby('nickname')['points'].agg(
+        total_games_played='count',
+        overall_avg_points='mean',
+        overall_min_points='min',
+        overall_max_points='max',
+        overall_std_points='std'
+    ).reset_index()
+    overall_stats['total_games_played'] = turns_df.groupby(
+        'nickname')['game_id'].nunique().values
+    df = df.merge(overall_stats, on='nickname', how='left')
+    return df
+
+
+from typing import List, Tuple
+import pandas as pd
+import numpy as np
+
+def calculate_past_window_features(df: pd.DataFrame, turns_df: pd.DataFrame, past_windows: List[int]) -> pd.DataFrame:
+    """
+    Calculates the player's history of games statistics over N past games.
+    
+    This function MUST be called after the following features have been added to df:
+    - 'created_at' and 'winner' (from 'merge_with_games')
+    - 'avg_points_per_game' (from 'add_points_per_game_stats')
+    - 'bingo_count' (from 'add_bingo_proxy_feature')
+
+    The 'turns_df' parameter is not used here, as it's assumed the
+    per-game stats have already been computed from it.
+    
+    Args:
+        df (pd.DataFrame): Input dataframe with per-game stats.
+        turns_df (pd.DataFrame): Not used, but kept for pipeline consistency.
+        past_windows (List[int]): List of past windows (e.g., [5, 10]).
+
+    Returns:
+        pd.DataFrame: Dataframe with new past-window features.
+    """
+    # This was written with the help of gemini-2.5
+    df = df.copy()
+
+    df['is_human'] = (~df['nickname'].isin(BOTS)).astype(int)
+    human_win_condition = (df['is_human'] == 1) & (df['winner'] == 1)
+    bot_win_condition = (df['is_human'] == 0) & (df['winner'] == 0)
+    df['is_win'] = (human_win_condition | bot_win_condition).astype(int)
+    df = df.drop(columns=['is_human'])
+
+    df = df.sort_values(by=['nickname', 'created_at'])
+    grouped = df.groupby('nickname', sort=False)
+    
+    df['past_avg_points'] = grouped['avg_points_per_game'].shift(1)
+    df['past_bingo_count'] = grouped['bingo_count'].shift(1)
+    df['past_is_win'] = grouped['is_win'].shift(1)
+
+    for window in past_windows:
+        # Create a new groupby object (on the sorted df)
+        # to calculate rolling features on the 'past_' columns.
+        grouped_past = df.groupby('nickname', sort=False)
+        
+        # Define the rolling window function. min_periods=1 ensures we get
+        # stats even if the player has played fewer than 'window' games.
+        rolling_obj = lambda col: grouped_past[col].rolling(window=window, min_periods=1)
+        
+        # Points stats
+        df[f'past_{window}_avg_points'] = rolling_obj('past_avg_points').mean().reset_index(level=0, drop=True).fillna(0)
+        df[f'past_{window}_min_points'] = rolling_obj('past_avg_points').min().reset_index(level=0, drop=True).fillna(0)
+        df[f'past_{window}_max_points'] = rolling_obj('past_avg_points').max().reset_index(level=0, drop=True).fillna(0)
+
+        # Count stats
+        # .count() counts the non-NaN 'past_is_win' values in the window
+        df[f'past_{window}_num_games'] = rolling_obj('past_is_win').count().reset_index(level=0, drop=True).fillna(0).astype(int)
+        
+        # .sum() adds up the bingos/wins in the window
+        df[f'past_{window}_num_bingos'] = rolling_obj('past_bingo_count').sum().reset_index(level=0, drop=True).fillna(0).astype(int)
+        df[f'past_{window}_num_wins'] = rolling_obj('past_is_win').sum().reset_index(level=0, drop=True).fillna(0).astype(int)
+
+    df = df.drop(columns=[ 'past_avg_points', 'past_bingo_count', 'past_is_win'])
+    df = df.sort_index()
+    
+    return df
+
+
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline.
@@ -237,6 +368,12 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_game_variant', FunctionTransformer(add_game_variant_feature)),
         ('add_number_of_bingos', FunctionTransformer(
             lambda df: add_bingo_proxy_feature(df, turns_df))),
+        ('add_turn_type_counts', FunctionTransformer(
+            lambda df: add_turn_type_counts(df, turns_df))),
+        ('add_overall_player_stats', FunctionTransformer(
+            lambda df: add_overall_player_stats(df, turns_df))),
+        ('add_past_window_features', FunctionTransformer(
+            lambda df: calculate_past_window_features(df, turns_df, past_windows=[1, 5, 10, 20]))),
     ])
     return pipeline, turns_df
 
