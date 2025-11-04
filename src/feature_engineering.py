@@ -8,12 +8,15 @@ from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
 from consts import DATA_DIR, BOTS
 
-def add_ohe_to_df(df: pd.DataFrame, col_name: str,drop_original: bool = True) -> pd.DataFrame:
+
+def add_ohe_to_df(df: pd.DataFrame, col_name: str, drop_original: bool = True) -> pd.DataFrame:
     """
     Adds one hot encoded features for the specified column.
     Args:
         df (pd.DataFrame): Input dataframe.
         col_name (str): Column name to one hot encode.
+    Raises:
+        ValueError: If the specified column is not found in the dataframe.
     Returns:
         pd.DataFrame: Dataframe with one hot encoded features.
     """
@@ -28,7 +31,8 @@ def add_ohe_to_df(df: pd.DataFrame, col_name: str,drop_original: bool = True) ->
         index=df.index
     )
     df = pd.concat([df, ohe_df], axis=1)
-    df.drop(columns=[col_name], inplace=True)
+    if drop_original:
+        df.drop(columns=[col_name], inplace=True)
     return df
 
 
@@ -144,6 +148,8 @@ def add_time_related_features(df: pd.DataFrame, timestamp_col='created_at') -> p
     Args:
         df (pd.DataFrame): Input dataframe with timestamp_col column.
         timestamp_col (str): Name of the timestamp column.
+    Raises:
+        ValueError: If the specified timestamp column is not found in the dataframe.
     Returns:
         pd.DataFrame: Dataframe with new time-related features.
     """
@@ -163,6 +169,7 @@ def add_time_related_features(df: pd.DataFrame, timestamp_col='created_at') -> p
     df = add_ohe_to_df(df, 'time_of_day')
     return df
 
+
 def add_game_variant_feature(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds one hot encoded features for a new game_variant feature: f'{Lexicon} - {time_control_name}'
@@ -175,6 +182,8 @@ def add_game_variant_feature(df: pd.DataFrame) -> pd.DataFrame:
     df['game_variant'] = df['lexicon'] + ' - ' + df['time_control_name']
     df = add_ohe_to_df(df, 'game_variant')
     return df
+
+
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline.
@@ -197,6 +206,7 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_bot_type', FunctionTransformer(add_bot_type)),
         ('add_time_features', FunctionTransformer(
             lambda df: add_time_related_features(df, 'created_at'))),
+        ('add_game_variant', FunctionTransformer(add_game_variant_feature)),
     ])
     return pipeline, turns_df
 
@@ -207,12 +217,14 @@ def save_processed_file(df: pd.DataFrame, path: str):
     Args:
         df (pd.DataFrame): Dataframe to save.
         path (str): Path to save the CSV file (including filename).
+    Raises:
+        OSError: If there is an error creating directories or saving the file.
     """
     try:
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_path, index=False)
-    except Exception as e:
+    except OSError as e:
         print(f"Error saving file to {path}: {e}")
 
 
@@ -236,5 +248,7 @@ def main():
 
     save_processed_file(train_df_fe, DATA_DIR / 'processed' / 'train_fe.csv')
     save_processed_file(test_df_fe, DATA_DIR / 'processed' / 'test_fe.csv')
+
+
 if __name__ == "__main__":
     main()
