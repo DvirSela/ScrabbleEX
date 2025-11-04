@@ -1,4 +1,4 @@
-import numpy as np
+import time
 from typing import List, Tuple
 from pathlib import Path
 
@@ -10,30 +10,45 @@ from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 from consts import DATA_DIR, BOTS
 
 
-def add_ohe_to_df(df: pd.DataFrame, col_name: str, drop_original: bool = True) -> pd.DataFrame:
+def add_ohe_to_df(df: pd.DataFrame, cols_name: List[str], drop_original: bool = True) -> pd.DataFrame:
     """
-    Adds one hot encoded features for the specified column.
+    Adds one-hot encoded features for the specified list of columns.
+
     Args:
         df (pd.DataFrame): Input dataframe.
-        col_name (str): Column name to one hot encode.
+        cols_name (List[str]): List of column names to one-hot encode.
+        drop_original (bool): Whether to drop the original columns.
+
     Raises:
-        ValueError: If the specified column is not found in the dataframe.
+        ValueError: If any specified column is not found in the dataframe.
+
     Returns:
-        pd.DataFrame: Dataframe with one hot encoded features.
+        pd.DataFrame: Dataframe with one-hot encoded features.
     """
     df = df.copy()
-    if col_name not in df.columns:
-        raise ValueError(f"Column '{col_name}' not found in dataframe.")
+    missing_cols = [col for col in cols_name if col not in df.columns]
+    if missing_cols:
+        raise ValueError(
+            f"Columns not found in dataframe: {', '.join(missing_cols)}")
+
     ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-    ohe_features = ohe.fit_transform(df[[col_name]])
+    ohe_features = ohe.fit_transform(df[cols_name])
+
+    new_col_names = []
+    for i, col in enumerate(cols_name):
+        categories = ohe.categories_[i]
+        new_col_names.extend([f'{col}_{cat}' for cat in categories])
+
     ohe_df = pd.DataFrame(
         ohe_features,
-        columns=[f'{col_name}_{cat}' for cat in ohe.categories_[0]],
+        columns=new_col_names,
         index=df.index
     )
+
     df = pd.concat([df, ohe_df], axis=1)
     if drop_original:
-        df.drop(columns=[col_name], inplace=True)
+        df.drop(columns=cols_name, inplace=True)
+
     return df
 
 
@@ -148,7 +163,7 @@ def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
     bot_rows = df[df['nickname'].isin(BOTS)]
     bot_map = bot_rows.set_index('game_id')['nickname']
     df.loc[:, 'opponent_bot'] = df['game_id'].map(bot_map)
-    df = add_ohe_to_df(df, 'opponent_bot')
+    df = add_ohe_to_df(df, ['opponent_bot'])
     return df
 
 
@@ -177,7 +192,7 @@ def add_time_related_features(df: pd.DataFrame, timestamp_col='created_at') -> p
         bins=[-1, 5, 11, 17, 21, 24],
         labels=['early_morning', 'morning', 'afternoon', 'evening', 'night']
     )
-    df = add_ohe_to_df(df, 'time_of_day')
+    df = add_ohe_to_df(df, ['time_of_day'])
     return df
 
 
@@ -191,7 +206,7 @@ def add_game_variant_feature(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     df['game_variant'] = df['lexicon'] + ' - ' + df['time_control_name']
-    df = add_ohe_to_df(df, 'game_variant')
+    df = add_ohe_to_df(df, ['game_variant'])
     return df
 
 
@@ -255,6 +270,7 @@ def add_overall_player_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Dat
     Adds overall player statistics:
     - Total games played
     - min,max,std,avg points per all games played
+    - min, max, avg 'max_overtime_minutes' per all games played
     Args:
         df (pd.DataFrame): Input dataframe with 'nickname' column.
         turns_df (pd.DataFrame): Turns dataframe with 'nickname' and 'points' columns.
@@ -271,29 +287,29 @@ def add_overall_player_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Dat
     ).reset_index()
     overall_stats['total_games_played'] = turns_df.groupby(
         'nickname')['game_id'].nunique().values
+    # 'max_overtime_minutes' is a column in df (from games_df)
+    overtime_stats = df.groupby('nickname')['max_overtime_minutes'].agg(
+        overall_avg_overtime='mean',
+        overall_min_overtime='min',
+        overall_max_overtime='max'
+    ).reset_index()
+    overall_stats = overall_stats.merge(
+        overtime_stats, on='nickname', how='left')
     df = df.merge(overall_stats, on='nickname', how='left')
     return df
 
 
-from typing import List, Tuple
-import pandas as pd
-import numpy as np
-
-def calculate_past_window_features(df: pd.DataFrame, turns_df: pd.DataFrame, past_windows: List[int]) -> pd.DataFrame:
+def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) -> pd.DataFrame:
     """
     Calculates the player's history of games statistics over N past games.
-    
+
     This function MUST be called after the following features have been added to df:
     - 'created_at' and 'winner' (from 'merge_with_games')
     - 'avg_points_per_game' (from 'add_points_per_game_stats')
     - 'bingo_count' (from 'add_bingo_proxy_feature')
 
-    The 'turns_df' parameter is not used here, as it's assumed the
-    per-game stats have already been computed from it.
-    
     Args:
         df (pd.DataFrame): Input dataframe with per-game stats.
-        turns_df (pd.DataFrame): Not used, but kept for pipeline consistency.
         past_windows (List[int]): List of past windows (e.g., [5, 10]).
 
     Returns:
@@ -310,7 +326,7 @@ def calculate_past_window_features(df: pd.DataFrame, turns_df: pd.DataFrame, pas
 
     df = df.sort_values(by=['nickname', 'created_at'])
     grouped = df.groupby('nickname', sort=False)
-    
+
     df['past_avg_points'] = grouped['avg_points_per_game'].shift(1)
     df['past_bingo_count'] = grouped['bingo_count'].shift(1)
     df['past_is_win'] = grouped['is_win'].shift(1)
@@ -319,27 +335,35 @@ def calculate_past_window_features(df: pd.DataFrame, turns_df: pd.DataFrame, pas
         # Create a new groupby object (on the sorted df)
         # to calculate rolling features on the 'past_' columns.
         grouped_past = df.groupby('nickname', sort=False)
-        
+
         # Define the rolling window function. min_periods=1 ensures we get
         # stats even if the player has played fewer than 'window' games.
-        rolling_obj = lambda col: grouped_past[col].rolling(window=window, min_periods=1)
-        
+        def rolling_obj(col):
+            return grouped_past[col].rolling(window=window, min_periods=1)
+
         # Points stats
-        df[f'past_{window}_avg_points'] = rolling_obj('past_avg_points').mean().reset_index(level=0, drop=True).fillna(0)
-        df[f'past_{window}_min_points'] = rolling_obj('past_avg_points').min().reset_index(level=0, drop=True).fillna(0)
-        df[f'past_{window}_max_points'] = rolling_obj('past_avg_points').max().reset_index(level=0, drop=True).fillna(0)
+        df[f'past_{window}_avg_points'] = rolling_obj(
+            'past_avg_points').mean().reset_index(level=0, drop=True).fillna(0)
+        df[f'past_{window}_min_points'] = rolling_obj(
+            'past_avg_points').min().reset_index(level=0, drop=True).fillna(0)
+        df[f'past_{window}_max_points'] = rolling_obj(
+            'past_avg_points').max().reset_index(level=0, drop=True).fillna(0)
 
         # Count stats
         # .count() counts the non-NaN 'past_is_win' values in the window
-        df[f'past_{window}_num_games'] = rolling_obj('past_is_win').count().reset_index(level=0, drop=True).fillna(0).astype(int)
-        
-        # .sum() adds up the bingos/wins in the window
-        df[f'past_{window}_num_bingos'] = rolling_obj('past_bingo_count').sum().reset_index(level=0, drop=True).fillna(0).astype(int)
-        df[f'past_{window}_num_wins'] = rolling_obj('past_is_win').sum().reset_index(level=0, drop=True).fillna(0).astype(int)
+        df[f'past_{window}_num_games'] = rolling_obj('past_is_win').count(
+        ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
-    df = df.drop(columns=[ 'past_avg_points', 'past_bingo_count', 'past_is_win'])
+        # .sum() adds up the bingos/wins in the window
+        df[f'past_{window}_num_bingos'] = rolling_obj('past_bingo_count').sum(
+        ).reset_index(level=0, drop=True).fillna(0).astype(int)
+        df[f'past_{window}_num_wins'] = rolling_obj('past_is_win').sum(
+        ).reset_index(level=0, drop=True).fillna(0).astype(int)
+
+    df = df.drop(columns=['past_avg_points',
+                 'past_bingo_count', 'past_is_win'])
     df = df.sort_index()
-    
+
     return df
 
 
@@ -373,7 +397,11 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_overall_player_stats', FunctionTransformer(
             lambda df: add_overall_player_stats(df, turns_df))),
         ('add_past_window_features', FunctionTransformer(
-            lambda df: calculate_past_window_features(df, turns_df, past_windows=[1, 5, 10, 20]))),
+            lambda df: calculate_past_window_features(df, past_windows=[1, 5, 10, 20]))),
+        ('add_rest_of_ohe', FunctionTransformer(
+            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'lexicon', 'rating_mode', 'day_of_week']))),
+        ('drop_unused_cols', FunctionTransformer(
+            lambda df: df.drop(columns=['created_at', 'winner'])))
     ])
     return pipeline, turns_df
 
@@ -399,6 +427,7 @@ def main():
     """
     Main function that runs the feature engineering pipeline on training and test datasets, and saves the results to CSV files.
     """
+    start_time = time.time()
     games_df = pd.read_csv(DATA_DIR / 'raw' / 'games.csv')
     turns_df = pd.read_csv(DATA_DIR / 'raw' / 'turns.csv')
     train_df = pd.read_csv(DATA_DIR / 'raw' / 'train.csv')
@@ -408,11 +437,11 @@ def main():
 
     train_df_fe = fe_pipeline.fit_transform(train_df)
     test_df_fe = fe_pipeline.transform(test_df)
-    print(f'{'-'*20} train_df_fe head {'-'*20}')
-    print(train_df_fe.head())
-    print(f'{'-'*20} test_df_fe head {'-'*20}')
-    print(test_df_fe.head())
-
+    print(f'{'-'*20} train_df_shape: {train_df_fe.shape} {'-'*20}')
+    print(f'{'-'*20} test_df_shape: {test_df_fe.shape} {'-'*20}')
+    print(
+        f"Feature engineering completed in {time.time() - start_time:.2f} seconds.")
+    print(f'Saving processed files to {DATA_DIR / "processed"} directory.')
     save_processed_file(train_df_fe, DATA_DIR / 'processed' / 'train_fe.csv')
     save_processed_file(test_df_fe, DATA_DIR / 'processed' / 'test_fe.csv')
 
