@@ -184,6 +184,34 @@ def add_game_variant_feature(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_bingo_proxy_feature(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds a feature for the number of bingos played by each player in each game.
+    A bingo is defined as a move that uses all 7 letters from the player's rack, and is awarded a 50-point bonus.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'move' columns.
+    Returns:
+        pd.DataFrame: Dataframe with new column 'number_of_bingos'.
+    """
+    df = df.copy()
+    is_bingo_proxy = (turns_df['points'] > 50) & (
+        turns_df['turn_type'] == 'Play')
+    bingo_counts = (
+        turns_df[is_bingo_proxy]
+        .groupby(['game_id', 'nickname'], as_index=False)
+        .size()
+        .rename(columns={'size': 'bingo_count'})
+    )
+    df = df.merge(
+        bingo_counts,
+        on=['game_id', 'nickname'],
+        how='left'
+    )
+    df['bingo_count'] = df['bingo_count'].fillna(0).astype(int)
+    return df
+
+
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline.
@@ -207,6 +235,8 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_time_features', FunctionTransformer(
             lambda df: add_time_related_features(df, 'created_at'))),
         ('add_game_variant', FunctionTransformer(add_game_variant_feature)),
+        ('add_number_of_bingos', FunctionTransformer(
+            lambda df: add_bingo_proxy_feature(df, turns_df))),
     ])
     return pipeline, turns_df
 
