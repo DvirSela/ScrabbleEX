@@ -8,7 +8,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
-from consts import DATA_DIR, BOTS
+from consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES
 
 
 def add_ohe_to_df(df: pd.DataFrame, cols_name: List[str], drop_original: bool = True) -> pd.DataFrame:
@@ -133,7 +133,7 @@ def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataF
 
 def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds features for player points per game (min, max, avg).
+    Adds features for player points per game (min, max, avg), and non-bingo plays related stats.
     Calculates statistics from the turns_df and merges them into the
     main dataframe based on 'game_id' and 'nickname'.
     Args:
@@ -141,7 +141,9 @@ def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Da
         turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'points' columns.
     Returns:
         pd.DataFrame: Dataframe with new columns: 
-                      'avg_points_per_game', 'min_points_per_game', 'max_points_per_game'.
+                      'avg_points_per_game', 'min_points_per_game', 'max_points_per_game',
+                      'median_points_per_game', 'std_points_per_game', and
+                      'average_non_bingo', 'median_non_bingo', 'std_non_bingo'.
     """
     df = df.copy()
 
@@ -152,7 +154,15 @@ def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Da
         median_points_per_game='median',
         std_points_per_game='std'
     ).reset_index()
+    player_non_bingo_average = turns_df[(turns_df['turn_type'] == 'Play') & (turns_df['points'] < 50)]\
+        .groupby(['game_id', 'nickname'])['points'].agg(
+            average_non_bingo='mean',
+            median_non_bingo='median',
+            std_non_bingo='std'
+    ).reset_index()
     df = df.merge(player_game_stats, on=['game_id', 'nickname'], how='left')
+    df = df.merge(player_non_bingo_average, on=[
+                  'game_id', 'nickname'], how='left')
     return df
 
 
@@ -453,6 +463,65 @@ def add_pacing_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFram
     return df
 
 
+def calculate_rack_value(rack_str: str) -> int:
+    """
+    Calculates the total Scrabble point value of a player's rack.
+    Args:
+        rack_str (str): String representing the player's rack (e.g., 'AEIOU??').
+    Returns:
+        int: Total point value of the rack.
+    """
+    return sum(SCRABBLE_LETTER_VALUES.get(letter.upper(), 0) for letter in rack_str)
+
+
+def add_rack_value_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds features related to the player's rack value and scoring efficiency.
+    Features Added:
+    - avg_rack_value: The player's average rack point value across all turns in the game.
+    - rack_efficiency_avg_turn_points: Avg points per turn divided by avg_rack_value.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id', 'nickname',
+                           and 'avg_points_per_game' columns.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'rack' columns.
+
+    Returns:
+        pd.DataFrame: Dataframe with new rack value features.
+    """
+    df = df.copy()
+    turns_df = turns_df[['game_id', 'nickname', 'rack']].copy()
+    turns_df['vowel_count'] = turns_df['rack'].apply(
+        lambda x: sum(1 for c in str(x).upper() if c in 'AEOUI'))
+
+    turns_df['consonant_count'] = turns_df['rack'].apply(lambda x: sum(
+        1 for c in str(x).upper() if c.isalpha() and c not in 'AEOUI'))
+    turns_df['turn_rack_value'] = turns_df['rack'].apply(calculate_rack_value)
+
+    player_game_rack_letter_stats = turns_df.groupby(['game_id', 'nickname']).agg(
+        avg_vowel_count=('vowel_count', 'mean'),
+        avg_consonant_count=('consonant_count', 'mean')
+    ).reset_index()
+    df = df.merge(player_game_rack_letter_stats, on=[
+                  'game_id', 'nickname'], how='left')
+    df['avg_vowel_count'] = df['avg_vowel_count'].fillna(0)
+    df['avg_consonant_count'] = df['avg_consonant_count'].fillna(0)
+
+    player_game_rack_stats = turns_df.groupby(['game_id', 'nickname'])['turn_rack_value'].agg(
+        avg_rack_value='mean'
+    ).reset_index()
+    df = df.merge(player_game_rack_stats, on=[
+                  'game_id', 'nickname'], how='left')
+    df['avg_rack_value'] = df['avg_rack_value'].fillna(0)
+
+    df['rack_efficiency_avg_turn_points'] = df['avg_points_per_game'] / \
+        df['avg_rack_value']
+    df.replace([np.inf, -np.inf], 0, inplace=True)
+    df['rack_efficiency_avg_turn_points'] = df['rack_efficiency_avg_turn_points'].fillna(
+        0)
+
+    return df
+
+
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline.
@@ -492,6 +561,8 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_score_margin', FunctionTransformer(add_score_margin_features)),
         ('add_pacing_features', FunctionTransformer(
             lambda df: add_pacing_features(df, turns_df))),
+        ('add_rack_value_features', FunctionTransformer(
+            lambda df: add_rack_value_features(df, turns_df))),
     ])
     return pipeline, turns_df
 
@@ -515,7 +586,7 @@ def save_processed_file(df: pd.DataFrame, path: str):
 
 def main():
     """
-    Main function that runs the feature engineering pipeline on training and test datasets, and saves the results to CSV files.
+    Main function to execute the feature engineering pipeline.    
     """
     start_time = time.time()
     games_df = pd.read_csv(DATA_DIR / 'raw' / 'games.csv')
@@ -534,8 +605,11 @@ def main():
     print(f'Saving processed files to {DATA_DIR / "processed"} directory.')
     save_processed_file(train_df_fe, DATA_DIR / 'processed' / 'train_fe.csv')
     save_processed_file(test_df_fe, DATA_DIR / 'processed' / 'test_fe.csv')
-    print(f'Columns in train_fe that are not in test_fe: {set(train_df_fe.columns) - set(test_df_fe.columns)}')
-    print(f'Columns in test_fe that are not in train_fe: {set(test_df_fe.columns) - set(train_df_fe.columns)}')
+    print(
+        f'Columns in train_fe that are not in test_fe: {set(train_df_fe.columns) - set(test_df_fe.columns)}')
+    print(
+        f'Columns in test_fe that are not in train_fe: {set(test_df_fe.columns) - set(train_df_fe.columns)}')
+
 
 if __name__ == "__main__":
     main()
