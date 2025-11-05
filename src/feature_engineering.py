@@ -467,7 +467,7 @@ def calculate_rack_value(rack_str: str) -> int:
     """
     Calculates the total Scrabble point value of a player's rack.
     Args:
-        rack_str (str): String representing the player's rack (e.g., 'AEIOU??').
+        rack_str (str): String representing the player's rack.
     Returns:
         int: Total point value of the rack.
     """
@@ -522,6 +522,54 @@ def add_rack_value_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Data
     return df
 
 
+def add_lead_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds turn-by-turn score differential features.
+    This tracks the lead/deficit for a player throughout the game.
+    Features Added:
+    - avg_lead: The player's average lead (or deficit) during the game.
+    - std_lead: The volatility of the lead.
+    - max_lead: The biggest lead the player ever had.
+    - min_lead: The worst deficit (biggest negative lead) the player ever had.
+    - final_lead: The player's lead at the end of their last turn.
+
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id', 'nickname'.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'turn_number', 
+                                 'nickname', and 'score' columns.
+
+    Returns:
+        pd.DataFrame: Dataframe with new lead-related features.
+    """
+    df = df.copy()
+    turns_data = turns_df[['game_id',
+                           'turn_number', 'nickname', 'score']].copy()
+    turns_data = turns_data.sort_values(by=['game_id', 'turn_number'])
+
+    turns_data['opponent_score_at_turn'] = turns_data.groupby(
+        'game_id')['score'].shift(1).fillna(0)
+
+    turns_data['turn_lead'] = turns_data['score'] - \
+        turns_data['opponent_score_at_turn']
+
+    lead_stats = turns_data.groupby(['game_id', 'nickname'])['turn_lead'].agg(
+        avg_lead='mean',
+        std_lead='std' ,
+        max_lead='max' ,
+        min_lead='min' ,
+        final_lead='last'
+    ).reset_index()
+
+    df = df.merge(lead_stats, on=['game_id', 'nickname'], how='left')
+
+    fill_cols = ['avg_lead', 'std_lead', 'max_lead', 'min_lead', 'final_lead']
+    for col in fill_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
+
+    return df
+
+
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline.
@@ -563,6 +611,8 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_pacing_features(df, turns_df))),
         ('add_rack_value_features', FunctionTransformer(
             lambda df: add_rack_value_features(df, turns_df))),
+        ('add_lead_features', FunctionTransformer(
+            lambda df: add_lead_features(df, turns_df))),
     ])
     return pipeline, turns_df
 
