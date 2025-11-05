@@ -3,6 +3,7 @@ from typing import List, Tuple
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
@@ -157,12 +158,21 @@ def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Da
 
 def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds a one hot encoded feature for bot type.
+    Adds a one hot encoded feature for bot type and a numeric 'opponent_bot_strength'.
+    The strength ordering follows the order in BOTS (index+1). Non-bot opponents -> 0.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+    Returns:
+        pd.DataFrame: Dataframe with new one hot encoded bot type features and 'opponent_bot_strength' column.
     """
     df = df.copy()
     bot_rows = df[df['nickname'].isin(BOTS)]
     bot_map = bot_rows.set_index('game_id')['nickname']
     df.loc[:, 'opponent_bot'] = df['game_id'].map(bot_map)
+
+    strength_map = {bot: idx + 1 for idx, bot in enumerate(BOTS)}
+    df['opponent_bot_strength'] = df['opponent_bot'].map(
+        strength_map).fillna(0).astype(int)
     df = add_ohe_to_df(df, ['opponent_bot'])
     return df
 
@@ -179,19 +189,29 @@ def add_time_related_features(df: pd.DataFrame, timestamp_col='created_at') -> p
     Returns:
         pd.DataFrame: Dataframe with new time-related features.
     """
-    if timestamp_col not in df.columns:
-        raise ValueError(f"Column '{timestamp_col}' not found in dataframe.")
     df = df.copy()
     df[timestamp_col] = pd.to_datetime(df[timestamp_col])
     df['day_of_week'] = df[timestamp_col].dt.day_name()
     df['hour_of_day'] = df[timestamp_col].dt.hour
     df['is_weekend'] = df['day_of_week'].isin(['Saturday', 'Sunday'])
     df['is_weekend'] = df['is_weekend'].astype(int)
+    df['month'] = df[timestamp_col].dt.month
     df['time_of_day'] = pd.cut(
         df['hour_of_day'],
         bins=[-1, 5, 11, 17, 21, 24],
         labels=['early_morning', 'morning', 'afternoon', 'evening', 'night']
     )
+    # Cyclical encodings, as suggested in here:
+    # https://medium.com/@axelazara6/why-we-need-encoding-cyclical-features-79ecc3531232
+    # formula is sin(2 * pi * x / max_x) and cos(2 * pi * x / max_x)
+    df['_dow_num'] = df[timestamp_col].dt.dayofweek
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour_of_day'] / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour_of_day'] / 24)
+    df['dow_sin'] = np.sin(2 * np.pi * df['_dow_num'] / 7)
+    df['dow_cos'] = np.cos(2 * np.pi * df['_dow_num'] / 7)
+    df['month_sin'] = np.sin(2 * np.pi * (df['month'] - 1) / 12)
+    df['month_cos'] = np.cos(2 * np.pi * (df['month'] - 1) / 12)
+    df.drop(columns=['_dow_num'], inplace=True)
     df = add_ohe_to_df(df, ['time_of_day'])
     return df
 
@@ -238,9 +258,9 @@ def add_bingo_proxy_feature(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Data
     return df
 
 
-def add_turn_type_counts(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+def add_turn_type_counts_ratios(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds features for counts of different turn types per player per game.
+    Adds features for counts and ratios of different turn types per player per game.
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
         turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'turn_type' columns.
@@ -261,6 +281,17 @@ def add_turn_type_counts(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFra
         'turn_count_game_id': 'game_id',
         'turn_count_nickname': 'nickname'
     }, inplace=True)
+    # now adding the ratios - dividing by total turns played by the player in that game
+    turn_type_cols = [
+        col for col in turn_type_counts.columns if col.startswith('turn_count_') and col not in ['game_id', 'nickname']
+    ]
+    turn_type_counts['total_turns'] = turn_type_counts[turn_type_cols].sum(
+        axis=1)
+    for col in turn_type_cols:
+        ratio_col = col.replace('turn_count_', 'turn_ratio_')
+        turn_type_counts[ratio_col] = turn_type_counts[col] / \
+            turn_type_counts['total_turns']
+    turn_type_counts.drop(columns=['total_turns'], inplace=True)
     df = df.merge(turn_type_counts, on=['game_id', 'nickname'], how='left')
     return df
 
@@ -367,6 +398,61 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
     return df
 
 
+def went_first(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds a feature indicating whether the player went first in the game.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+    Returns:
+        pd.DataFrame: Dataframe with new column 'went_first'.
+    """
+    df = df.copy()
+    df['went_first'] = (df['first'] == df['nickname']).astype(int)
+    return df
+
+
+def add_score_margin_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds opponent_score, score_margin (player - opponent).
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'score' columns.
+    Returns:
+        pd.DataFrame: Dataframe with new columns 'opponent_score' and 'score_margin'.
+    """
+    df = df.copy()
+    total_score = df.groupby('game_id')['score'].transform('sum')
+    df['opponent_score'] = total_score - df['score']
+    df['score_margin'] = df['score'] - df['opponent_score']
+    return df
+
+
+def add_pacing_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds pace-related features:
+      - num_turns (per player per game)
+      - turns_per_minute
+      - points_per_minute
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id', 'nickname', and 'game_duration_seconds' columns.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id' and 'nickname' columns.
+    Returns:
+        pd.DataFrame: Dataframe with new pace-related features.
+    """
+    df = df.copy()
+    turns_per_player = (
+        turns_df.groupby(['game_id', 'nickname'], as_index=False)
+        .size()
+        .rename(columns={'size': 'num_turns'})
+    )
+    df = df.merge(turns_per_player, on=['game_id', 'nickname'], how='left')
+    df['num_turns'] = df['num_turns'].fillna(0).astype(int)
+
+    minutes = (df['game_duration_seconds'] / 60).replace(0, np.nan)
+    df['turns_per_minute'] = (df['num_turns'] / minutes).fillna(0.0)
+    df['points_per_minute'] = (df['score'] / minutes).fillna(0.0)
+    return df
+
+
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline.
@@ -382,6 +468,7 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('merge_games', FunctionTransformer(
             lambda df: merge_with_games(df, games_df))),
         ('add_casual_flag', FunctionTransformer(add_casual_only_flag)),
+        ('add_went_first', FunctionTransformer(went_first)),
         ('add_avg_points', FunctionTransformer(
             lambda df: add_points_per_game_stats(df, turns_df))),
         ('add_board_letters', FunctionTransformer(
@@ -393,7 +480,7 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_number_of_bingos', FunctionTransformer(
             lambda df: add_bingo_proxy_feature(df, turns_df))),
         ('add_turn_type_counts', FunctionTransformer(
-            lambda df: add_turn_type_counts(df, turns_df))),
+            lambda df: add_turn_type_counts_ratios(df, turns_df))),
         ('add_overall_player_stats', FunctionTransformer(
             lambda df: add_overall_player_stats(df, turns_df))),
         ('add_past_window_features', FunctionTransformer(
@@ -401,7 +488,10 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_rest_of_ohe', FunctionTransformer(
             lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'lexicon', 'rating_mode', 'day_of_week']))),
         ('drop_unused_cols', FunctionTransformer(
-            lambda df: df.drop(columns=['created_at', 'winner'])))
+            lambda df: df.drop(columns=['created_at', 'winner']))),
+        ('add_score_margin', FunctionTransformer(add_score_margin_features)),
+        ('add_pacing_features', FunctionTransformer(
+            lambda df: add_pacing_features(df, turns_df))),
     ])
     return pipeline, turns_df
 
@@ -444,7 +534,8 @@ def main():
     print(f'Saving processed files to {DATA_DIR / "processed"} directory.')
     save_processed_file(train_df_fe, DATA_DIR / 'processed' / 'train_fe.csv')
     save_processed_file(test_df_fe, DATA_DIR / 'processed' / 'test_fe.csv')
-
+    print(f'Columns in train_fe that are not in test_fe: {set(train_df_fe.columns) - set(test_df_fe.columns)}')
+    print(f'Columns in test_fe that are not in train_fe: {set(test_df_fe.columns) - set(train_df_fe.columns)}')
 
 if __name__ == "__main__":
     main()
