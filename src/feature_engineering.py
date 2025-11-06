@@ -7,9 +7,9 @@ import numpy as np
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
-import textstat
+from textstat import textstat
 
-from consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES
+from consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES,PAST_WINDOWS_SIZES
 
 
 def add_ohe_to_df(df: pd.DataFrame, cols_name: List[str], drop_original: bool = True) -> pd.DataFrame:
@@ -630,7 +630,7 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_overall_player_stats', FunctionTransformer(
             lambda df: add_overall_player_stats(df, turns_df))),
         ('add_past_window_features', FunctionTransformer(
-            lambda df: calculate_past_window_features(df, past_windows=[1, 5, 10, 20]))),
+            lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
         ('add_rest_of_ohe', FunctionTransformer(
             lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'lexicon', 'rating_mode', 'day_of_week']))),
         ('drop_unused_cols', FunctionTransformer(
