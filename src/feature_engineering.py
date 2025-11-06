@@ -7,6 +7,7 @@ import numpy as np
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
+import textstat
 
 from consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES
 
@@ -113,7 +114,7 @@ def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataF
         pd.DataFrame: Dataframe with new column 'total_board_letters_used'.
     """
     df = df.copy()
-    turns_df = turns_df.copy()
+    turns_df = turns_df[['game_id', 'nickname', 'turn_type', 'move']].copy()
 
     mask = turns_df['turn_type'] == 'Play'
     turns_df['board_letters_used'] = 0
@@ -554,9 +555,9 @@ def add_lead_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
 
     lead_stats = turns_data.groupby(['game_id', 'nickname'])['turn_lead'].agg(
         avg_lead='mean',
-        std_lead='std' ,
-        max_lead='max' ,
-        min_lead='min' ,
+        std_lead='std',
+        max_lead='max',
+        min_lead='min',
         final_lead='last'
     ).reset_index()
 
@@ -567,6 +568,34 @@ def add_lead_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].fillna(0)
 
+    return df
+
+
+def add_textstat_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds textstat features based on the 'move' column in turns_df.
+    Features Added:
+    - average_difficult_words: Average number of difficult words used by the player in the game.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'move' columns.
+    Returns:
+        pd.DataFrame: Dataframe with new textstat features.
+    """
+    df = df.copy()
+    turns_df = turns_df[['game_id', 'nickname', 'turn_type', 'move']].copy()
+
+    play_turns = turns_df[turns_df['turn_type'] == 'Play'].copy()
+    play_turns['num_difficult_words'] = play_turns['move'].apply(
+        lambda x: textstat.difficult_words(
+            str(x).replace('.', '').replace('?', ' '))
+    )
+    difficult_words_stats = play_turns.groupby(['game_id', 'nickname'])['num_difficult_words'].agg(
+        sum_difficult_words='sum'
+    ).reset_index()
+    df = df.merge(difficult_words_stats, on=[
+                  'game_id', 'nickname'], how='left')
+    df['sum_difficult_words'] = df['sum_difficult_words'].fillna(0)
     return df
 
 
@@ -613,6 +642,8 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_rack_value_features(df, turns_df))),
         ('add_lead_features', FunctionTransformer(
             lambda df: add_lead_features(df, turns_df))),
+        ('add_textstat_features', FunctionTransformer(
+            lambda df: add_textstat_features(df, turns_df))),
     ])
     return pipeline, turns_df
 
@@ -634,9 +665,9 @@ def save_processed_file(df: pd.DataFrame, path: str):
         print(f"Error saving file to {path}: {e}")
 
 
-def main():
+def run_feature_engineering():
     """
-    Main function to execute the feature engineering pipeline.    
+    Main function to run the feature engineering pipeline.
     """
     start_time = time.time()
     games_df = pd.read_csv(DATA_DIR / 'raw' / 'games.csv')
@@ -659,7 +690,3 @@ def main():
         f'Columns in train_fe that are not in test_fe: {set(train_df_fe.columns) - set(test_df_fe.columns)}')
     print(
         f'Columns in test_fe that are not in train_fe: {set(test_df_fe.columns) - set(train_df_fe.columns)}')
-
-
-if __name__ == "__main__":
-    main()
