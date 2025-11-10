@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Tuple, Dict, Any, List
 from functools import partial
 import pickle
+import argparse
 
 import pandas as pd
 import numpy as np
@@ -240,7 +241,7 @@ def generate_submission_file(pipeline: Pipeline, test_df: pd.DataFrame, test_gam
     print(f"Saved {model_name} predictions to {output_path}")
 
 
-def run_hyperparameter_tuning(models_to_run: List[str], models_that_need_scaling: List[str], X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.DataFrame):
+def run_hyperparameter_tuning(models_to_run: List[str], models_that_need_scaling: List[str], X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.DataFrame, n_trials: int = N_TRIALS) -> Dict[str, optuna.study.Study]:
     """
     Runs hyperparameter tuning for multiple models using Optuna.
     Args:
@@ -250,6 +251,7 @@ def run_hyperparameter_tuning(models_to_run: List[str], models_that_need_scaling
         y_train (pd.Series): Training target
         X_val (pd.DataFrame): Validation features
         y_val (pd.Series): Validation target
+        n_trials (int): Number of trials for each model
     Returns:
         Dict[str, optuna.study.Study]: A dictionary mapping model names to their respective Optuna studies
     """
@@ -268,12 +270,14 @@ def run_hyperparameter_tuning(models_to_run: List[str], models_that_need_scaling
             X_val=X_val,
             y_val=y_val
         )
-        study.optimize(obj_func, n_trials=N_TRIALS, show_progress_bar=True)
+        study.optimize(obj_func, n_trials=n_trials, show_progress_bar=True)
 
         print(
             f"Finished tuning {model_name}. Best trial RMSE: {study.best_value:.4f}")
         print(f"Best params: {study.best_params}")
         studies[model_name] = study
+    with open(DATA_DIR / 'models' / 'tuned_studies.pkl', 'wb') as f:
+        pickle.dump(studies, f)
     return studies
 
 
@@ -352,6 +356,7 @@ def evaluate_and_save_results(studies: Dict[str, optuna.study.Study], models_tha
     print(results_df.to_string(index=False, float_format="%.4f"))
     results_df.to_csv(DATA_DIR / 'model_tuning_results.csv', index=False)
     print("\nDisplaying prediction histograms...")
+    plt.tight_layout()
     plt.savefig(DATA_DIR / 'model_tuning_results.png')
     plt.show()
 
@@ -360,6 +365,14 @@ def main():
     """
     Main function to run the full tuning, training, and evaluation pipeline.
     """
+    parser = argparse.ArgumentParser(
+        description="Run model tuning and evaluation pipeline.")
+    parser.add_argument('--n_trials', type=int, default=N_TRIALS,
+                        help='Number of trials for hyperparameter tuning.')
+    parser.add_argument('--load_studies', action='store_true',
+                        help='Load existing tuned studies from disk.')
+    args = parser.parse_args()
+
     print("Loading and preprocessing data...")
     train_fe_path = DATA_DIR / 'processed' / 'train_fe_no_bots.csv'
     test_fe_path = DATA_DIR / 'processed' / 'test_fe_no_bots.csv'
@@ -376,14 +389,15 @@ def main():
     models_to_run = ['Ridge', 'KNeighborsRegressor',
                      'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
     models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
+    if not args.load_studies:
+        print(f"\n--- Starting Model Tuning (Running {args.n_trials} Trials) ---")
 
-    print(f"\n--- Starting Model Tuning (Running {N_TRIALS} trials each) ---")
-
-    studies = run_hyperparameter_tuning(
-        models_to_run, models_that_need_scaling, X_train, y_train, X_val, y_val)
-    with open(DATA_DIR / 'models' / 'tuned_studies.pkl', 'wb') as f:
-        pickle.dump(studies, f)
-
+        studies = run_hyperparameter_tuning(
+            models_to_run, models_that_need_scaling, X_train, y_train, X_val, y_val, n_trials=args.n_trials)
+    else:
+        print("\n--- Loading Existing Tuned Studies ---")
+        with open(DATA_DIR / 'models' / 'tuned_studies.pkl', 'rb') as f:
+            studies = pickle.load(f)
     evaluate_and_save_results(
         studies, models_that_need_scaling, X_train, y_train, X_val, y_val, true_test_df, test_game_ids)
 
