@@ -20,7 +20,7 @@ from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 
-from .consts import DATA_DIR, SEED, N_TRIALS
+from .config import DATA_DIR, SEED, N_TRIALS, SUBMISSION_DIR
 from .feature_engineering import run_feature_engineering
 
 
@@ -240,39 +240,22 @@ def generate_submission_file(pipeline: Pipeline, test_df: pd.DataFrame, test_gam
     print(f"Saved {model_name} predictions to {output_path}")
 
 
-def main():
+def run_hyperparameter_tuning(models_to_run: List[str], models_that_need_scaling: List[str], X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.DataFrame):
     """
-    Main function to run the full tuning, training, and evaluation pipeline.
+    Runs hyperparameter tuning for multiple models using Optuna.
+    Args:
+        models_to_run (List[str]): List of model names to tune
+        models_that_need_scaling (List[str]): List of model names that require feature scaling
+        X_train (pd.DataFrame): Training features
+        y_train (pd.Series): Training target
+        X_val (pd.DataFrame): Validation features
+        y_val (pd.Series): Validation target
+    Returns:
+        Dict[str, optuna.study.Study]: A dictionary mapping model names to their respective Optuna studies
     """
-    print("Loading and preprocessing data...")
-    train_fe_path = DATA_DIR / 'processed' / 'train_fe_no_bots.csv'
-    test_fe_path = DATA_DIR / 'processed' / 'test_fe_no_bots.csv'
-    train_df, true_test_df = pre_process(train_fe_path, test_fe_path)
-
-    cols_to_drop = ['nickname', 'first']
-    train_x, train_y, true_test_df, test_game_ids = clean_data(
-        train_df, true_test_df, cols_to_drop)
-
-    X_train, X_val, y_train, y_val = train_test_split(
-        train_x, train_y, train_size=0.8, random_state=SEED
-    )
-    print(
-        f"Data split: {len(X_train)} for tuning-train, {len(X_val)} for tuning-validation")
-
-    models_to_run = ['Ridge', 'KNeighborsRegressor',
-                     'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor', 'RandomForestRegressor']
-    models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
-    submission_dir = DATA_DIR / 'submissions'
-
-    results = []
-    fig, axes = plt.subplots(3, 2, figsize=(18, 15))
-    flat_axes = axes.flatten()
-
-    print(f"\n--- Starting Model Tuning (Running {N_TRIALS} trials each) ---")
-
-    for i, model_name in enumerate(models_to_run):
+    studies = {}
+    for model_name in models_to_run:
         print(f"\n--- Tuning {model_name} ---")
-
         needs_scaling = model_name in models_that_need_scaling
 
         study = optuna.create_study(direction='minimize')
@@ -290,13 +273,31 @@ def main():
         print(
             f"Finished tuning {model_name}. Best trial RMSE: {study.best_value:.4f}")
         print(f"Best params: {study.best_params}")
-        # saving the study for future reference if needed
-        study_path = DATA_DIR / 'models' / f'{model_name}_tuning_study.pkl'
-        study_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(study_path, 'wb') as f:
-            pickle.dump(study, f)
+        studies[model_name] = study
+    return studies
 
-        print(f"Evaluating best model on validation set (for plots/metrics)...")
+
+def evaluate_and_generate_submissions(studies: Dict[str, optuna.study.Study], models_that_need_scaling: List[str], X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.DataFrame, true_test_df: pd.DataFrame, test_game_ids: pd.Series):
+    """
+    Evaluates the best models from the studies on the validation set and generates submission files.
+    Args:
+        studies (Dict[str, optuna.study.Study]): A dictionary mapping model names to their respective Optuna studies
+        models_that_need_scaling (List[str]): List of model names that require feature scaling
+        X_train (pd.DataFrame): Training features
+        y_train (pd.Series): Training target
+        X_val (pd.DataFrame): Validation features
+        y_val (pd.Series): Validation target
+        true_test_df (pd.DataFrame): The test features dataframe
+        test_game_ids (pd.Series): Series of game IDs for the test set
+    """
+    results = []
+    fig, axes = plt.subplots(3, 2, figsize=(18, 15))
+    flat_axes = axes.flatten()
+
+    for i, (model_name, study) in enumerate(studies.items()):
+        print(f"\n--- Evaluating {model_name} ---")
+        needs_scaling = model_name in models_that_need_scaling
+
         start_time = time.time()
         best_model_for_eval = get_model_and_params(
             model_name, study.best_trial)
@@ -325,17 +326,66 @@ def main():
                            y_pred_val, model_name, metrics)
 
         generate_submission_file(
-            best_pipeline_for_eval, true_test_df, test_game_ids, model_name, submission_dir)
+            best_pipeline_for_eval, true_test_df, test_game_ids, model_name, SUBMISSION_DIR)
+    return results
 
+
+def evaluate_and_save_results(studies: Dict[str, optuna.study.Study], models_that_need_scaling: List[str], X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.DataFrame, true_test_df: pd.DataFrame, test_game_ids: pd.Series):
+    """
+    Evaluates the best models from the studies on the validation set and generates submission files.
+    Args:
+        studies (Dict[str, optuna.study.Study]): A dictionary mapping model names to their respective Optuna studies
+        models_that_need_scaling (List[str]): List of model names that require feature scaling
+        X_train (pd.DataFrame): Training features
+        y_train (pd.Series): Training target
+        X_val (pd.DataFrame): Validation features
+        y_val (pd.Series): Validation target
+        true_test_df (pd.DataFrame): The test features dataframe
+        test_game_ids (pd.Series): Series of game IDs for the test set
+    """
+    results = evaluate_and_generate_submissions(
+        studies, models_that_need_scaling, X_train, y_train, X_val, y_val, true_test_df, test_game_ids)
     results_df = pd.DataFrame(results).sort_values(
         by='Val RMSE', ascending=True)
 
     print("\n--- Model Comparison Results (Tuned) ---")
     print(results_df.to_string(index=False, float_format="%.4f"))
-
+    results_df.to_csv(DATA_DIR / 'model_tuning_results.csv', index=False)
     print("\nDisplaying prediction histograms...")
     plt.savefig(DATA_DIR / 'model_tuning_results.png')
     plt.show()
+
+
+def main():
+    """
+    Main function to run the full tuning, training, and evaluation pipeline.
+    """
+    print("Loading and preprocessing data...")
+    train_fe_path = DATA_DIR / 'processed' / 'train_fe_no_bots.csv'
+    test_fe_path = DATA_DIR / 'processed' / 'test_fe_no_bots.csv'
+    train_df, true_test_df = pre_process(train_fe_path, test_fe_path)
+
+    cols_to_drop = ['nickname', 'first']
+    train_x, train_y, true_test_df, test_game_ids = clean_data(
+        train_df, true_test_df, cols_to_drop)
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        train_x, train_y, train_size=0.8, random_state=SEED
+    )
+
+    models_to_run = ['Ridge', 'KNeighborsRegressor',
+                     'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
+    models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
+
+    print(f"\n--- Starting Model Tuning (Running {N_TRIALS} trials each) ---")
+
+    studies = run_hyperparameter_tuning(
+        models_to_run, models_that_need_scaling, X_train, y_train, X_val, y_val)
+    with open(DATA_DIR / 'models' / 'tuned_studies.pkl', 'wb') as f:
+        pickle.dump(studies, f)
+
+    evaluate_and_save_results(
+        studies, models_that_need_scaling, X_train, y_train, X_val, y_val, true_test_df, test_game_ids)
 
 
 if __name__ == "__main__":
