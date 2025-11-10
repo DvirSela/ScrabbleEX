@@ -1,16 +1,14 @@
 import time
 from typing import List, Tuple
-from pathlib import Path
 
 import pandas as pd
 import numpy as np
-from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
+from sklearn.preprocessing import FunctionTransformer
 from textstat import textstat
 
-from src.consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES, PAST_WINDOWS_SIZES
-from src.util import add_ohe_to_df, merge_with_another_df, impute_missing_with_empty_string, calculate_rack_value
+from src.config import DATA_DIR, BOTS, PAST_WINDOWS_SIZES
+from src.util import add_ohe_to_df, merge_with_another_df, impute_missing_with_empty_string, calculate_rack_value, save_processed_file
 
 
 def add_casual_only_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -566,23 +564,6 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_textstat_features(df, turns_df))),
     ])
     return pipeline, turns_df
-
-
-def save_processed_file(df: pd.DataFrame, path: str):
-    """
-    Saves the processed dataframe to a CSV file, creating directories if they do not exist.
-    Args:
-        df (pd.DataFrame): Dataframe to save.
-        path (str): Path to save the CSV file (including filename).
-    Raises:
-        OSError: If there is an error creating directories or saving the file.
-    """
-    try:
-        output_path = Path(path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(output_path, index=False)
-    except OSError as e:
-        print(f"Error saving file to {path}: {e}")
 
 
 def run_feature_engineering():

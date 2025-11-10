@@ -1,6 +1,7 @@
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
+SUBMISSION_DIR = DATA_DIR / 'submissions'
 BOTS = ['BetterBot', 'STEEBot', 'HastyBot']
 PAST_WINDOWS_SIZES = [1, 5, 10, 20]
 SEED = 42
@@ -10,4 +11,4 @@ SCRABBLE_LETTER_VALUES = {
     'S': 1, 'T': 1, 'U': 1, 'V': 4, 'W': 4, 'X': 8, 'Y': 4, 'Z': 10,
     '?': 0
 }
-N_TRIALS = 50
+N_TRIALS = 1

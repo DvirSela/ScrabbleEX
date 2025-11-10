@@ -1,10 +1,11 @@
 from typing import List
+from pathlib import Path
 
 import pandas as pd
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.impute import SimpleImputer
 
-from src.consts import SCRABBLE_LETTER_VALUES
+from src.config import SCRABBLE_LETTER_VALUES
 
 
 def add_ohe_to_df(df: pd.DataFrame, cols_name: List[str], drop_original: bool = True) -> pd.DataFrame:
@@ -93,3 +94,20 @@ def calculate_rack_value(rack_str: str) -> int:
         int: Total point value of the rack.
     """
     return sum(SCRABBLE_LETTER_VALUES.get(letter.upper(), 0) for letter in rack_str)
+
+
+def save_processed_file(df: pd.DataFrame, path: str):
+    """
+    Saves the processed dataframe to a CSV file, creating directories if they do not exist.
+    Args:
+        df (pd.DataFrame): Dataframe to save.
+        path (str): Path to save the CSV file (including filename).
+    Raises:
+        OSError: If there is an error creating directories or saving the file.
+    """
+    try:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_path, index=False)
+    except OSError as e:
+        print(f"Error saving file to {path}: {e}")
