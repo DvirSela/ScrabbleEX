@@ -1,3 +1,4 @@
+import numpy as np  # Make sure numpy is imported at the top of your file
 import time
 from typing import List, Tuple
 
@@ -31,14 +32,14 @@ def add_casual_only_flag(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds a feature for each game and player indicating the total number of letters he used on the board (so not from his rack).
+    Adds a feature for each game and player indicating the mean number of letters he used on the board (so not from his rack).
     These letters are calculated from the 'move' column in turns_df, and are indicated by lowercase letters and '.'s.
     This calculation is ONLY performed for turns where turn_type == 'Play'.
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
         turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'move' columns.
     Returns:
-        pd.DataFrame: Dataframe with new column 'total_board_letters_used'.
+        pd.DataFrame: Dataframe with new column 'mean_board_letters_used'.
     """
     df = df.copy()
     turns_df = turns_df[['game_id', 'nickname', 'turn_type', 'move']].copy()
@@ -49,9 +50,9 @@ def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataF
         lambda x: str(x).count(".") + sum(int(c.islower()) for c in str(x))
     )
     player_board_letters = turns_df.groupby(['game_id', 'nickname'])[
-        'board_letters_used'].sum().reset_index()
+        'board_letters_used'].mean().reset_index()
     player_board_letters.rename(
-        columns={'board_letters_used': 'total_board_letters_used'}, inplace=True)
+        columns={'board_letters_used': 'mean_board_letters_used'}, inplace=True)
     df = df.merge(player_board_letters, on=['game_id', 'nickname'], how='left')
 
     df['total_board_letters_used'] = df['total_board_letters_used'].fillna(
@@ -99,8 +100,7 @@ def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Da
 
 def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds a one hot encoded feature for bot type and a numeric 'opponent_bot_strength'.
-    The strength ordering follows the order in BOTS (index+1). Non-bot opponents -> 0.
+    Adds a one hot encoded feature for bot type.
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
     Returns:
@@ -110,11 +110,8 @@ def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
     bot_rows = df[df['nickname'].isin(BOTS)]
     bot_map = bot_rows.set_index('game_id')['nickname']
     df.loc[:, 'opponent_bot'] = df['game_id'].map(bot_map)
-
-    strength_map = {bot: idx + 1 for idx, bot in enumerate(BOTS)}
-    df['opponent_bot_strength'] = df['opponent_bot'].map(
-        strength_map).fillna(0).astype(int)
     df = add_ohe_to_df(df, ['opponent_bot'])
+
     return df
 
 
@@ -172,15 +169,21 @@ def add_game_variant_feature(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_bingo_proxy_feature(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds a feature for the number of bingos played by each player in each game.
-    A bingo is defined as a move that uses all 7 letters from the player's rack, and is awarded a 50-point bonus.
+    Adds a feature for the ratio of turns that are bingos played by each player in each game.
+    A bingo is defined as a move that uses all 7 letters from the player's rack, 
+    and is awarded a 50-point bonus.
+
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
         turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'move' columns.
+
     Returns:
-        pd.DataFrame: Dataframe with new column 'number_of_bingos'.
+        pd.DataFrame: Dataframe with new column 'bingo_ratio'.
     """
     df = df.copy()
+
+    total_turns = turns_df.groupby(
+        ['game_id', 'nickname']).size().reset_index(name='total_turns')
     is_bingo_proxy = (turns_df['points'] > 50) & (
         turns_df['turn_type'] == 'Play')
     bingo_counts = (
@@ -189,12 +192,19 @@ def add_bingo_proxy_feature(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Data
         .size()
         .rename(columns={'size': 'bingo_count'})
     )
+    df = df.merge(total_turns, on=['game_id', 'nickname'], how='left')
+
+    df['total_turns'] = df['total_turns'].fillna(0)
     df = df.merge(
         bingo_counts,
         on=['game_id', 'nickname'],
         how='left'
     )
     df['bingo_count'] = df['bingo_count'].fillna(0).astype(int)
+    df['bingo_ratio'] = np.where(
+        df['total_turns'] > 0, df['bingo_count'] / df['total_turns'], 0)
+    df = df.drop(columns=['total_turns', 'bingo_count'])
+
     return df
 
 
@@ -517,6 +527,33 @@ def add_textstat_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFr
     return df
 
 
+def add_count_turn_types(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds features for counts of different turn types per player per game.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'turn_type' columns.
+    Returns:
+    df (pd.DataFrame): Dataframe with new columns for each turn type count.
+    """
+    df = df.copy()
+    turn_type_counts = turns_df.pivot_table(
+        index=['game_id', 'nickname'],
+        columns='turn_type',
+        aggfunc='size',
+        fill_value=0
+    ).reset_index()
+
+    turn_type_counts.columns.name = None
+    turn_type_counts = turn_type_counts.add_prefix('turn_count_')
+    turn_type_counts.rename(columns={
+        'turn_count_game_id': 'game_id',
+        'turn_count_nickname': 'nickname'
+    }, inplace=True)
+    df = df.merge(turn_type_counts, on=['game_id', 'nickname'], how='left')
+    return df
+
+
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline.
@@ -562,6 +599,8 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_lead_features(df, turns_df))),
         ('add_textstat_features', FunctionTransformer(
             lambda df: add_textstat_features(df, turns_df))),
+        ('add_count_turn_types', FunctionTransformer(
+            lambda df: add_count_turn_types(df, turns_df))),
     ])
     return pipeline, turns_df
 
