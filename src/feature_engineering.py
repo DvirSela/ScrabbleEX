@@ -9,79 +9,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 from textstat import textstat
 
-from src.consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES,PAST_WINDOWS_SIZES
-
-
-def add_ohe_to_df(df: pd.DataFrame, cols_name: List[str], drop_original: bool = True) -> pd.DataFrame:
-    """
-    Adds one-hot encoded features for the specified list of columns.
-
-    Args:
-        df (pd.DataFrame): Input dataframe.
-        cols_name (List[str]): List of column names to one-hot encode.
-        drop_original (bool): Whether to drop the original columns.
-
-    Raises:
-        ValueError: If any specified column is not found in the dataframe.
-
-    Returns:
-        pd.DataFrame: Dataframe with one-hot encoded features.
-    """
-    df = df.copy()
-    missing_cols = [col for col in cols_name if col not in df.columns]
-    if missing_cols:
-        raise ValueError(
-            f"Columns not found in dataframe: {', '.join(missing_cols)}")
-
-    ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-    ohe_features = ohe.fit_transform(df[cols_name])
-
-    new_col_names = []
-    for i, col in enumerate(cols_name):
-        categories = ohe.categories_[i]
-        new_col_names.extend([f'{col}_{cat}' for cat in categories])
-
-    ohe_df = pd.DataFrame(
-        ohe_features,
-        columns=new_col_names,
-        index=df.index
-    )
-
-    df = pd.concat([df, ohe_df], axis=1)
-    if drop_original:
-        df.drop(columns=cols_name, inplace=True)
-
-    return df
-
-
-def impute_missing_with_empty_string(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-    """
-    Imputes missing values in the specified column with an empty string.
-    Args:
-        df (pd.DataFrame): Input dataframe.
-        columns (List[str]): List of column names to impute.
-    Returns:
-        pd.DataFrame: Dataframe with imputed values.
-    """
-    df = df.copy()
-    for col in columns:
-        if col in df.columns:
-            imputer = SimpleImputer(strategy='constant', fill_value='')
-            df[[col]] = imputer.fit_transform(df[[col]])
-    return df
-
-
-def merge_with_games(df: pd.DataFrame, games_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merge with games_df on 'game_id'.
-    Args:
-        df (pd.DataFrame): Input dataframe.
-        games_df (pd.DataFrame): Games dataframe to merge with.
-    Returns:
-        pd.DataFrame: Merged dataframe.
-    """
-    df = df.copy()
-    return df.merge(games_df, on='game_id', how='left')
+from src.consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES, PAST_WINDOWS_SIZES
+from src.util import add_ohe_to_df, merge_with_another_df, impute_missing_with_empty_string, calculate_rack_value
 
 
 def add_casual_only_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -194,12 +123,11 @@ def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
 def add_time_related_features(df: pd.DataFrame, timestamp_col='created_at') -> pd.DataFrame:
     """
     Adds time-related features extracted from the timestamp_col column.
-    Features added: 'hour_of_day', 'day_of_week', 'is_weekend', 'time_of_day'.
+    Features added: 'hour_of_day', 'day_of_week', 'is_weekend', 'time_of_day', 'month',
+    and cyclical encodings for hour, day of week, and month.
     Args:
         df (pd.DataFrame): Input dataframe with timestamp_col column.
         timestamp_col (str): Name of the timestamp column.
-    Raises:
-        ValueError: If the specified timestamp column is not found in the dataframe.
     Returns:
         pd.DataFrame: Dataframe with new time-related features.
     """
@@ -442,10 +370,10 @@ def add_score_margin_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_pacing_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds pace-related features:
-      - num_turns (per player per game)
-      - turns_per_minute
-      - points_per_minute
+    Adds pacing-related features:
+    - turns_per_minute: Number of turns played per minute.
+    - points_per_minute: Number of points scored per minute.
+    - num_turns: Total number of turns played in the game.
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id', 'nickname', and 'game_duration_seconds' columns.
         turns_df (pd.DataFrame): Turns dataframe with 'game_id' and 'nickname' columns.
@@ -465,17 +393,6 @@ def add_pacing_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFram
     df['turns_per_minute'] = (df['num_turns'] / minutes).fillna(0.0)
     df['points_per_minute'] = (df['score'] / minutes).fillna(0.0)
     return df
-
-
-def calculate_rack_value(rack_str: str) -> int:
-    """
-    Calculates the total Scrabble point value of a player's rack.
-    Args:
-        rack_str (str): String representing the player's rack.
-    Returns:
-        int: Total point value of the rack.
-    """
-    return sum(SCRABBLE_LETTER_VALUES.get(letter.upper(), 0) for letter in rack_str)
 
 
 def add_rack_value_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
@@ -615,7 +532,7 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
 
     pipeline = Pipeline([
         ('merge_games', FunctionTransformer(
-            lambda df: merge_with_games(df, games_df))),
+            lambda df: merge_with_another_df(df, games_df, on='game_id'))),
         ('add_casual_flag', FunctionTransformer(add_casual_only_flag)),
         ('add_went_first', FunctionTransformer(went_first)),
         ('add_avg_points', FunctionTransformer(
@@ -692,5 +609,7 @@ def run_feature_engineering():
 
     train_no_bots = train_df_fe[~train_df_fe['nickname'].isin(BOTS)]
     test_no_bots = test_df_fe[~test_df_fe['nickname'].isin(BOTS)]
-    save_processed_file(train_no_bots, DATA_DIR / 'processed' / 'train_fe_no_bots.csv')
-    save_processed_file(test_no_bots, DATA_DIR / 'processed' / 'test_fe_no_bots.csv')
+    save_processed_file(train_no_bots, DATA_DIR /
+                        'processed' / 'train_fe_no_bots.csv')
+    save_processed_file(test_no_bots, DATA_DIR /
+                        'processed' / 'test_fe_no_bots.csv')
