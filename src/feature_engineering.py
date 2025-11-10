@@ -9,7 +9,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 from textstat import textstat
 
-from consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES,PAST_WINDOWS_SIZES
+from src.consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES,PAST_WINDOWS_SIZES
 
 
 def add_ohe_to_df(df: pd.DataFrame, cols_name: List[str], drop_original: bool = True) -> pd.DataFrame:
@@ -164,6 +164,9 @@ def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Da
     df = df.merge(player_game_stats, on=['game_id', 'nickname'], how='left')
     df = df.merge(player_non_bingo_average, on=[
                   'game_id', 'nickname'], how='left')
+    df['average_non_bingo'] = df['average_non_bingo'].fillna(0).astype(int)
+    df['median_non_bingo'] = df['median_non_bingo'].fillna(0).astype(int)
+    df['std_non_bingo'] = df['std_non_bingo'].fillna(0).astype(int)
     return df
 
 
@@ -686,7 +689,8 @@ def run_feature_engineering():
     print(f'Saving processed files to {DATA_DIR / "processed"} directory.')
     save_processed_file(train_df_fe, DATA_DIR / 'processed' / 'train_fe.csv')
     save_processed_file(test_df_fe, DATA_DIR / 'processed' / 'test_fe.csv')
-    print(
-        f'Columns in train_fe that are not in test_fe: {set(train_df_fe.columns) - set(test_df_fe.columns)}')
-    print(
-        f'Columns in test_fe that are not in train_fe: {set(test_df_fe.columns) - set(train_df_fe.columns)}')
+
+    train_no_bots = train_df_fe[~train_df_fe['nickname'].isin(BOTS)]
+    test_no_bots = test_df_fe[~test_df_fe['nickname'].isin(BOTS)]
+    save_processed_file(train_no_bots, DATA_DIR / 'processed' / 'train_fe_no_bots.csv')
+    save_processed_file(test_no_bots, DATA_DIR / 'processed' / 'test_fe_no_bots.csv')
