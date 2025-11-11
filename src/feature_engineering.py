@@ -55,7 +55,7 @@ def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataF
         columns={'board_letters_used': 'mean_board_letters_used'}, inplace=True)
     df = df.merge(player_board_letters, on=['game_id', 'nickname'], how='left')
 
-    df['total_board_letters_used'] = df['total_board_letters_used'].fillna(
+    df['mean_board_letters_used'] = df['mean_board_letters_used'].fillna(
         0).astype(int)
     return df
 
@@ -287,7 +287,7 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
     This function MUST be called after the following features have been added to df:
     - 'created_at' and 'winner' (from 'merge_with_games')
     - 'avg_points_per_game' (from 'add_points_per_game_stats')
-    - 'bingo_count' (from 'add_bingo_proxy_feature')
+    - 'bingo_ratio' (from 'add_bingo_proxy_feature')
 
     Args:
         df (pd.DataFrame): Input dataframe with per-game stats.
@@ -309,7 +309,7 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
     grouped = df.groupby('nickname', sort=False)
 
     df['past_avg_points'] = grouped['avg_points_per_game'].shift(1)
-    df['past_bingo_count'] = grouped['bingo_count'].shift(1)
+    df['past_bingo_ratio'] = grouped['bingo_ratio'].shift(1)
     df['past_is_win'] = grouped['is_win'].shift(1)
 
     for window in past_windows:
@@ -336,13 +336,13 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
         # .sum() adds up the bingos/wins in the window
-        df[f'past_{window}_num_bingos'] = rolling_obj('past_bingo_count').sum(
+        df[f'past_{window}_num_bingos'] = rolling_obj('past_bingo_ratio').sum(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
         df[f'past_{window}_num_wins'] = rolling_obj('past_is_win').sum(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
     df = df.drop(columns=['past_avg_points',
-                 'past_bingo_count', 'past_is_win'])
+                 'past_bingo_ratio', 'past_is_win'])
     df = df.sort_index()
 
     return df
@@ -584,8 +584,8 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_turn_type_counts_ratios(df, turns_df))),
         ('add_overall_player_stats', FunctionTransformer(
             lambda df: add_overall_player_stats(df, turns_df))),
-        ('add_past_window_features', FunctionTransformer(
-            lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
+        # ('add_past_window_features', FunctionTransformer(
+        #     lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
         ('add_rest_of_ohe', FunctionTransformer(
             lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'lexicon', 'rating_mode', 'day_of_week']))),
         ('drop_unused_cols', FunctionTransformer(

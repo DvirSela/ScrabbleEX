@@ -28,7 +28,7 @@ from .feature_engineering import run_feature_engineering
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-def pre_process(train_fe_path: Path, test_fe_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Runs feature engineering pipeline on train and test data.
     Args:
@@ -37,8 +37,8 @@ def pre_process(train_fe_path: Path, test_fe_path: Path) -> Tuple[pd.DataFrame, 
     Returns:
         Tuple[pd.DataFrame, pd.DataFrame]: A tuple of train and test data after feature engineering
     """
-    if not train_fe_path.exists() or not test_fe_path.exists():
-        print("Running feature engineering pipeline...")
+    if force_run_fe or not train_fe_path.exists() or not test_fe_path.exists():
+        print(f"Running feature engineering pipeline{' (forced)' if force_run_fe else ''}...")
         run_feature_engineering()
     else:
         print("FE files already exist. Skipping FE pipeline.")
@@ -371,12 +371,14 @@ def main():
                         help='Number of trials for hyperparameter tuning.')
     parser.add_argument('--load_studies', action='store_true',
                         help='Load existing tuned studies from disk.')
+    parser.add_argument('--run_fe', action='store_true',
+                        help='Run feature engineering pipeline even if files exist.')
     args = parser.parse_args()
 
     print("Loading and preprocessing data...")
     train_fe_path = DATA_DIR / 'processed' / 'train_fe_no_bots.csv'
     test_fe_path = DATA_DIR / 'processed' / 'test_fe_no_bots.csv'
-    train_df, true_test_df = pre_process(train_fe_path, test_fe_path)
+    train_df, true_test_df = pre_process(train_fe_path, test_fe_path, force_run_fe=args.run_fe)
 
     cols_to_drop = ['nickname', 'first']
     train_x, train_y, true_test_df, test_game_ids = clean_data(
@@ -390,7 +392,8 @@ def main():
                      'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
     models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
     if not args.load_studies:
-        print(f"\n--- Starting Model Tuning (Running {args.n_trials} Trials) ---")
+        print(
+            f"\n--- Starting Model Tuning (Running {args.n_trials} Trials) ---")
 
         studies = run_hyperparameter_tuning(
             models_to_run, models_that_need_scaling, X_train, y_train, X_val, y_val, n_trials=args.n_trials)
