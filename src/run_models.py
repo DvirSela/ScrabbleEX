@@ -99,8 +99,7 @@ def create_pipeline(model: Any, needs_scaling: bool) -> Pipeline:
     """
     if needs_scaling:
         return Pipeline([('scaler', StandardScaler()), ('model', model)])
-    else:
-        return Pipeline([('model', model)])
+    return Pipeline([('model', model)])
 
 
 def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
@@ -116,13 +115,13 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
         alpha = trial.suggest_float('alpha', 1e-3, 10.0, log=True)
         return Ridge(alpha=alpha, random_state=SEED)
 
-    elif model_name == 'KNeighborsRegressor':
+    if model_name == 'KNeighborsRegressor':
         n_neighbors = trial.suggest_int('n_neighbors', 1, 50)
         weights = trial.suggest_categorical('weights', ['uniform', 'distance'])
         p = trial.suggest_int('p', 1, 2)  # 1 for Manhattan, 2 for Euclidean
         return KNeighborsRegressor(n_neighbors=n_neighbors, weights=weights, p=p, n_jobs=-1)
 
-    elif model_name == 'XGBRegressor':
+    if model_name == 'XGBRegressor':
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
             'max_depth': trial.suggest_int('max_depth', 3, 10),
@@ -133,7 +132,7 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
         }
         return XGBRegressor(**params, random_state=SEED, n_jobs=-1)
 
-    elif model_name == 'LGBMRegressor':
+    if model_name == 'LGBMRegressor':
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
             'max_depth': trial.suggest_int('max_depth', 3, 10),
@@ -144,7 +143,7 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
         }
         return LGBMRegressor(**params, random_state=SEED, verbose=-1, log_level='silent', n_jobs=-1)
 
-    elif model_name == 'CatBoostRegressor':
+    if model_name == 'CatBoostRegressor':
         params = {
             'iterations': trial.suggest_int('iterations', 100, 1000),
             'depth': trial.suggest_int('depth', 3, 10),
@@ -153,7 +152,7 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
             'border_count': trial.suggest_int('border_count', 32, 255),
         }
         return CatBoostRegressor(**params, random_state=SEED, verbose=0)
-    elif model_name == 'RandomForestRegressor':
+    if model_name == 'RandomForestRegressor':
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
             'criterion': trial.suggest_categorical('criterion', ['squared_error', 'absolute_error', 'poisson']),
@@ -295,7 +294,7 @@ def evaluate_and_generate_submissions(studies: Dict[str, optuna.study.Study], mo
         test_game_ids (pd.Series): Series of game IDs for the test set
     """
     results = []
-    fig, axes = plt.subplots(3, 2, figsize=(18, 15))
+    _, axes = plt.subplots(3, 2, figsize=(18, 15))
     flat_axes = axes.flatten()
 
     for i, (model_name, study) in enumerate(studies.items()):
