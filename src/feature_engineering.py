@@ -1,4 +1,3 @@
-import numpy as np  # Make sure numpy is imported at the top of your file
 import time
 from typing import List, Tuple
 
@@ -335,9 +334,8 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
         df[f'past_{window}_num_games'] = rolling_obj('past_is_win').count(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
-        # .sum() adds up the bingos/wins in the window
-        df[f'past_{window}_num_bingos'] = rolling_obj('past_bingo_ratio').sum(
-        ).reset_index(level=0, drop=True).fillna(0).astype(int)
+        df[f'past_{window}_avg_bingo_ratio'] = rolling_obj(
+            'past_bingo_ratio').mean().reset_index(level=0, drop=True).fillna(0)
         df[f'past_{window}_num_wins'] = rolling_obj('past_is_win').sum(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
@@ -556,7 +554,7 @@ def add_count_turn_types(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFra
 
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
-    Builds the feature engineering pipeline.
+    Builds the feature engineering pipeline. 
     Args:
         games_df (pd.DataFrame): Games dataframe.
         turns_df (pd.DataFrame): Turns dataframe.
@@ -584,10 +582,10 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_turn_type_counts_ratios(df, turns_df))),
         ('add_overall_player_stats', FunctionTransformer(
             lambda df: add_overall_player_stats(df, turns_df))),
-        # ('add_past_window_features', FunctionTransformer(
-        #     lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
+        ('add_past_window_features', FunctionTransformer(
+            lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
         ('add_rest_of_ohe', FunctionTransformer(
-            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'lexicon', 'rating_mode', 'day_of_week']))),
+            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'rating_mode', 'day_of_week']))),
         ('drop_unused_cols', FunctionTransformer(
             lambda df: df.drop(columns=['created_at', 'winner']))),
         ('add_score_margin', FunctionTransformer(add_score_margin_features)),
@@ -599,8 +597,8 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_lead_features(df, turns_df))),
         ('add_textstat_features', FunctionTransformer(
             lambda df: add_textstat_features(df, turns_df))),
-        ('add_count_turn_types', FunctionTransformer(
-            lambda df: add_count_turn_types(df, turns_df))),
+        # ('add_count_turn_types', FunctionTransformer(
+        #     lambda df: add_count_turn_types(df, turns_df))),
     ])
     return pipeline, turns_df
 
