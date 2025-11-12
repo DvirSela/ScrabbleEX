@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import optuna
 
 from sklearn.linear_model import Ridge
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -23,6 +23,7 @@ from catboost import CatBoostRegressor
 
 from .config import DATA_DIR, SEED, N_TRIALS, SUBMISSION_DIR
 from .feature_engineering import run_feature_engineering
+from .util import remove_casual_only_players
 
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -38,7 +39,8 @@ def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = Fa
         Tuple[pd.DataFrame, pd.DataFrame]: A tuple of train and test data after feature engineering
     """
     if force_run_fe or not train_fe_path.exists() or not test_fe_path.exists():
-        print(f"Running feature engineering pipeline{' (forced)' if force_run_fe else ''}...")
+        print(
+            f"Running feature engineering pipeline{' (forced)' if force_run_fe else ''}...")
         run_feature_engineering()
     else:
         print("FE files already exist. Skipping FE pipeline.")
@@ -60,7 +62,7 @@ def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = Fa
     return train_df_fe, test_df_fe
 
 
-def clean_data(train_df: pd.DataFrame, test_df: pd.DataFrame, cols_to_drop: List[str]) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+def clean_data(train_df: pd.DataFrame, true_test_df: pd.DataFrame, cols_to_drop: List[str]) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
     """
     Drops unnecessary columns and prepares X, y, and test sets.
     Args:
@@ -73,21 +75,15 @@ def clean_data(train_df: pd.DataFrame, test_df: pd.DataFrame, cols_to_drop: List
     for col in cols_to_drop:
         if col in train_df.columns:
             train_df = train_df.drop(columns=[col])
-        if col in test_df.columns:
-            test_df = test_df.drop(columns=[col])
 
-    test_game_ids = test_df['game_id']
+    test_game_ids = true_test_df['game_id']
 
     if 'game_id' in train_df.columns:
         train_df = train_df.drop(columns=['game_id'])
-    if 'game_id' in test_df.columns:
-        test_df = test_df.drop(columns=['game_id'])
 
     train_y = train_df['rating']
     train_x = train_df.drop(columns=['rating'])
-    test_df_processed = test_df[train_x.columns]
-
-    return train_x, train_y, test_df_processed, test_game_ids
+    return train_x, train_y, true_test_df, test_game_ids
 
 
 def create_pipeline(model: Any, needs_scaling: bool) -> Pipeline:
@@ -220,7 +216,7 @@ def plot_model_results(ax: plt.Axes, y_test: pd.Series, y_pred: np.ndarray, mode
     )
 
 
-def generate_submission_file(pipeline: Pipeline, test_df: pd.DataFrame, test_game_ids: pd.Series, model_name: str, output_dir: Path):
+def generate_submission_file(pipeline: Pipeline, true_test_df: pd.DataFrame, test_game_ids: pd.Series, model_name: str, output_dir: Path):
     """
     Generates and saves a submission CSV file for a given model.
     Args:
@@ -231,9 +227,20 @@ def generate_submission_file(pipeline: Pipeline, test_df: pd.DataFrame, test_gam
         output_dir (Path): Directory to save the submission file
     """
     print(f"Generating submission file for {model_name}...")
-    test_predictions = pipeline.predict(test_df)
+    test_predictions = pipeline.predict(
+        true_test_df.drop(columns=['first', 'game_id', 'nickname']))
     submission_df = pd.DataFrame(
         {'game_id': test_game_ids, 'rating': test_predictions})
+
+    # This is temporary - will be moved to function
+    submission_df = submission_df.merge(
+        true_test_df[['game_id', 'nickname', 'casual_only_player']], on='game_id')
+    casual_player_means = submission_df[submission_df['casual_only_player'] == 1].groupby(
+        'nickname')['rating'].transform('mean')
+    submission_df.loc[submission_df['casual_only_player']
+                      == 1, 'rating'] = casual_player_means
+    submission_df = submission_df[['game_id', 'rating']]
+
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f'submission_{model_name}_tuned.csv'
     submission_df.to_csv(output_path, index=False, float_format="%.4f")
@@ -275,12 +282,23 @@ def run_hyperparameter_tuning(models_to_run: List[str], models_that_need_scaling
             f"Finished tuning {model_name}. Best trial RMSE: {study.best_value:.4f}")
         print(f"Best params: {study.best_params}")
         studies[model_name] = study
-    with open(DATA_DIR / 'models' / 'tuned_studies.pkl', 'wb') as f:
+    with open(DATA_DIR / 'models' / f'tuned_studies{n_trials}_trials.pkl', 'wb') as f:
         pickle.dump(studies, f)
     return studies
 
 
-def evaluate_and_generate_submissions(studies: Dict[str, optuna.study.Study], models_that_need_scaling: List[str], X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.DataFrame, true_test_df: pd.DataFrame, test_game_ids: pd.Series):
+def evaluate_and_generate_submissions(
+        studies: Dict[str, optuna.study.Study],
+        models_that_need_scaling: List[str],
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_val: pd.DataFrame,
+        y_val: pd.DataFrame,
+        true_test_df: pd.DataFrame,
+        test_game_ids: pd.Series,
+        all_train_x: pd.DataFrame,
+        all_train_y: pd.Series
+) -> List[Dict[str, Any]]:
     """
     Evaluates the best models from the studies on the validation set and generates submission files.
     Args:
@@ -292,6 +310,10 @@ def evaluate_and_generate_submissions(studies: Dict[str, optuna.study.Study], mo
         y_val (pd.Series): Validation target
         true_test_df (pd.DataFrame): The test features dataframe
         test_game_ids (pd.Series): Series of game IDs for the test set
+        all_train_x (pd.DataFrame): All training features (train + val)
+        all_train_y (pd.Series): All training target (train + val)
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries containing evaluation results for each model
     """
     results = []
     _, axes = plt.subplots(3, 2, figsize=(18, 15))
@@ -328,12 +350,38 @@ def evaluate_and_generate_submissions(studies: Dict[str, optuna.study.Study], mo
         plot_model_results(flat_axes[i], y_val,
                            y_pred_val, model_name, metrics)
 
+        print(f"Re-training {model_name} on full dataset for submission...")
+        start_time_full = time.time()
+
+        final_model = get_model_and_params(model_name, study.best_trial)
+        final_pipeline = create_pipeline(final_model, needs_scaling)
+        final_pipeline.fit(all_train_x, all_train_y)
+
+        full_train_duration = time.time() - start_time_full
+        print(f"Full re-train finished in {full_train_duration:.2f}s.")
+
         generate_submission_file(
-            best_pipeline_for_eval, true_test_df, test_game_ids, model_name, SUBMISSION_DIR)
+            final_pipeline, true_test_df, test_game_ids, model_name, SUBMISSION_DIR)
+
+    for j in range(i + 1, len(flat_axes)):
+        flat_axes[j].axis('off')
+
     return results
 
 
-def evaluate_and_save_results(studies: Dict[str, optuna.study.Study], models_that_need_scaling: List[str], X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.DataFrame, true_test_df: pd.DataFrame, test_game_ids: pd.Series):
+def evaluate_and_save_results(
+        studies: Dict[str, optuna.study.Study],
+        models_that_need_scaling: List[str],
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_val: pd.DataFrame,
+        y_val: pd.DataFrame,
+        true_test_df: pd.DataFrame,
+        test_game_ids: pd.Series,
+        all_train_x: pd.DataFrame,
+        all_train_y: pd.Series,
+        n_trials: int = N_TRIALS
+):
     """
     Evaluates the best models from the studies on the validation set and generates submission files.
     Args:
@@ -345,15 +393,25 @@ def evaluate_and_save_results(studies: Dict[str, optuna.study.Study], models_tha
         y_val (pd.Series): Validation target
         true_test_df (pd.DataFrame): The test features dataframe
         test_game_ids (pd.Series): Series of game IDs for the test set
+        all_train_x (pd.DataFrame): All training features (train + val)
+        all_train_y (pd.Series): All training target (train + val)
+        n_trials (int): Number of trials used in tuning (for filename purposes)
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries containing evaluation results for each model
     """
     results = evaluate_and_generate_submissions(
-        studies, models_that_need_scaling, X_train, y_train, X_val, y_val, true_test_df, test_game_ids)
+        studies, models_that_need_scaling,
+        X_train, y_train, X_val, y_val,
+        true_test_df, test_game_ids,
+        all_train_x, all_train_y
+    )
     results_df = pd.DataFrame(results).sort_values(
         by='Val RMSE', ascending=True)
 
     print("\n--- Model Comparison Results (Tuned) ---")
     print(results_df.to_string(index=False, float_format="%.4f"))
-    results_df.to_csv(DATA_DIR / 'model_tuning_results.csv', index=False)
+    results_df.to_csv(
+        DATA_DIR / f'model_tuning_results_{n_trials}_trials.csv', index=False, float_format="%.4f")
     print("\nDisplaying prediction histograms...")
     plt.tight_layout()
     plt.savefig(DATA_DIR / 'model_tuning_results.png')
@@ -377,18 +435,26 @@ def main():
     print("Loading and preprocessing data...")
     train_fe_path = DATA_DIR / 'processed' / 'train_fe_no_bots.csv'
     test_fe_path = DATA_DIR / 'processed' / 'test_fe_no_bots.csv'
-    train_df, true_test_df = pre_process(train_fe_path, test_fe_path, force_run_fe=args.run_fe)
+    train_df, true_test_df = pre_process(
+        train_fe_path, test_fe_path, force_run_fe=args.run_fe)
 
+    train_df = remove_casual_only_players(train_df)
+
+    train_groups = train_df['nickname']
     cols_to_drop = ['nickname', 'first']
     train_x, train_y, true_test_df, test_game_ids = clean_data(
         train_df, true_test_df, cols_to_drop)
 
-    X_train, X_val, y_train, y_val = train_test_split(
-        train_x, train_y, train_size=0.8, random_state=SEED
-    )
+    print(f"Splitting data into train/val using GroupShuffleSplit...")
+    gss = GroupShuffleSplit(n_splits=1, train_size=0.8, random_state=SEED)
+    train_idx, val_idx = next(gss.split(train_x, train_y, groups=train_groups))
 
-    models_to_run = ['Ridge', 'KNeighborsRegressor',
-                     'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
+    X_train, X_val = train_x.iloc[train_idx], train_x.iloc[val_idx]
+    y_train, y_val = train_y.iloc[train_idx], train_y.iloc[val_idx]
+    print(f"Train shape: {X_train.shape}, Validation shape: {X_val.shape}")
+
+    models_to_run = ['Ridge', 'XGBRegressor',
+                     'LGBMRegressor', 'CatBoostRegressor']
     models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
     if not args.load_studies:
         print(
@@ -398,10 +464,10 @@ def main():
             models_to_run, models_that_need_scaling, X_train, y_train, X_val, y_val, n_trials=args.n_trials)
     else:
         print("\n--- Loading Existing Tuned Studies ---")
-        with open(DATA_DIR / 'models' / 'tuned_studies.pkl', 'rb') as f:
+        with open(DATA_DIR / 'models' / f'tuned_studies{args.n_trials}_trials.pkl', 'rb') as f:
             studies = pickle.load(f)
     evaluate_and_save_results(
-        studies, models_that_need_scaling, X_train, y_train, X_val, y_val, true_test_df, test_game_ids)
+        studies, models_that_need_scaling, X_train, y_train, X_val, y_val, true_test_df, test_game_ids, train_x, train_y, n_trials=args.n_trials)
 
 
 if __name__ == "__main__":

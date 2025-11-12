@@ -111,3 +111,25 @@ def save_processed_file(df: pd.DataFrame, path: str):
         df.to_csv(output_path, index=False)
     except OSError as e:
         print(f"Error saving file to {path}: {e}")
+
+
+def remove_casual_only_players(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Removes all rows for players who have only played casual games.
+    Assumes that the 'casual_only_player' column is already present in df.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'casual_only_player' column.
+    Raises:
+        ValueError: If 'casual_only_player' column is not found in the dataframe.
+    Returns:
+        pd.DataFrame: Dataframe with casual-only players filtered out.
+    """
+    if 'casual_only_player' not in df.columns:
+        raise ValueError(
+            "The dataframe must contain a 'casual_only_player' column.")
+    df = df.copy()
+    initial_rows = df.shape[0]
+    df = df[df['casual_only_player'] == 0].reset_index(drop=True)
+    rows_removed = initial_rows - df.shape[0]
+    print(f"Removed {rows_removed} rows belonging to casual-only players.")
+    return df
