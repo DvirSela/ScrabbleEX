@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import optuna
 from optuna.pruners import MedianPruner
 from sklearn.linear_model import Ridge
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -61,7 +61,7 @@ def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = Fa
     return train_df_fe, test_df_fe
 
 
-def clean_data(train_df: pd.DataFrame, test_df: pd.DataFrame, cols_to_drop: List[str]) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+def clean_data(train_df: pd.DataFrame, test_df: pd.DataFrame, cols_to_drop: List[str]) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.Series]:
     """
     Drops unnecessary columns and prepares X, y, and test sets.
     Args:
@@ -69,8 +69,10 @@ def clean_data(train_df: pd.DataFrame, test_df: pd.DataFrame, cols_to_drop: List
         test_df (pd.DataFrame): The test dataframe
         cols_to_drop (List[str]): List of columns to drop from both dataframes
     Returns:
-        Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.DataFrame]: train_x, train_y, test_df_processed, test_game_ids
+        Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.Series]: train_x, train_y, test_df_processed, test_game_ids, train_groups
     """
+
+    train_groups = train_df['nickname']
     for col in cols_to_drop:
         if col in train_df.columns:
             train_df = train_df.drop(columns=[col])
@@ -88,7 +90,7 @@ def clean_data(train_df: pd.DataFrame, test_df: pd.DataFrame, cols_to_drop: List
     train_x = train_df.drop(columns=['rating'])
     test_df_processed = test_df[train_x.columns]
 
-    return train_x, train_y, test_df_processed, test_game_ids
+    return train_x, train_y, test_df_processed, test_game_ids, train_groups
 
 
 def create_pipeline(model: Any, needs_scaling: bool) -> Pipeline:
@@ -169,57 +171,42 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
         raise ValueError(f"Model {model_name} not recognized for tuning.")
 
 
-def objective(trial: optuna.trial.Trial, model_name: str, needs_scaling: bool, X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> float:
+def objective(trial: optuna.trial.Trial, model_name: str, needs_scaling: bool, X: pd.DataFrame, y: pd.Series, groups: pd.Series) -> float:
     """
     The Optuna objective function.
-    Trains a model with suggested params and returns the validation RMSE.
+    Performs GroupKFold cross-validation and returns the mean validation RMSE.
     Args:
         trial (optuna.trial.Trial): The Optuna trial object
         model_name (str): Name of the model to tune
         needs_scaling (bool): Whether the model needs feature scaling
-        X_train (pd.DataFrame): Training features
-        y_train (pd.Series): Training target
-        X_val (pd.DataFrame): Validation features
-        y_val (pd.Series): Validation target
+        X (pd.DataFrame): Full training features
+        y (pd.Series): Full training target
+        groups (pd.Series): Series of groups (nickname) for CV
     Returns:
-        float: The validation RMSE
+        float: The mean validation RMSE across all folds
     """
     model = get_model_and_params(model_name, trial)
     pipeline = create_pipeline(model, needs_scaling)
-    pipeline.fit(X_train, y_train)
-    y_pred = pipeline.predict(X_val)
-    rmse = np.sqrt(mean_squared_error(y_val, y_pred))
 
-    return rmse
+    gkf = GroupKFold(n_splits=5)
+    rmses = []
+    maes = []
 
+    for train_idx, val_idx in gkf.split(X, y, groups=groups):
+        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-def plot_model_results(ax: plt.Axes, y_test: pd.Series, y_pred: np.ndarray, model_name: str, metrics: Dict[str, float]):
-    """
-    Plots prediction and true value histograms on a given matplotlib axis.
-    Args:
-        ax (plt.Axes): The matplotlib axis to plot on
-        y_test (pd.Series): True target values
-        y_pred (np.ndarray): Predicted target values
-        model_name (str): Name of the model for the title
-        metrics (Dict[str, float]): Evaluation metrics to display on the plot
-    """
-    ax.hist(y_test, bins=50, alpha=0.7, label='True Values (y_test)',
-            color='blue', edgecolor='black')
-    ax.hist(y_pred, bins=50, alpha=0.7, label='Predictions (y_pred)',
-            color='orange', edgecolor='black')
-    ax.set_title(f"{model_name} (Tuned) Predictions vs. True Values")
-    ax.set_xlabel("Rating")
-    ax.set_ylabel("Frequency")
-    ax.legend()
-    text_str = (
-        f"RMSE: {metrics['RMSE']:.2f}\n"
-        f"MAE: {metrics['MAE']:.2f}\n"
-    )
-    ax.text(
-        0.95, 0.95, text_str, transform=ax.transAxes, fontsize=10,
-        verticalalignment='top', horizontalalignment='right',
-        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8)
-    )
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_val)
+
+        rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+        mae = mean_absolute_error(y_val, y_pred)
+        rmses.append(rmse)
+        maes.append(mae)
+
+    trial.set_user_attr("mean_mae", np.mean(maes))
+
+    return np.mean(rmses)
 
 
 def generate_submission_file(pipeline: Pipeline, test_df: pd.DataFrame, test_game_ids: pd.Series, model_name: str, output_dir: Path):
@@ -260,96 +247,77 @@ def main():
         train_fe_path, test_fe_path, force_run_fe=args.run_fe)
 
     cols_to_drop = ['nickname', 'first']
-    train_x, train_y, true_test_df, test_game_ids = clean_data(
-        train_df, true_test_df, cols_to_drop)
-
-    X_train, X_val, y_train, y_val = train_test_split(
-        train_x, train_y, train_size=0.8, random_state=SEED
+    train_x, train_y, true_test_df, test_game_ids, train_groups = clean_data(
+        train_df, true_test_df, cols_to_drop
     )
     print(
-        f"Data split: {len(X_train)} for tuning-train, {len(X_val)} for tuning-validation")
-
+        f"Data loaded: {len(train_x)} training samples for CV, {len(true_test_df)} test samples.")
     # models_to_run = ['Ridge',
     #  'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
     models_to_run = ['CatBoostRegressor']
     models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
     submission_dir = DATA_DIR / 'submissions'
-
     results = []
-    fig, axes = plt.subplots(3, 2, figsize=(18, 15))
-    flat_axes = axes.flatten()
 
     print(
-        f"\n--- Starting Model Tuning (Running {args.n_trials} trials each) ---")
+        f"\n--- Starting Model Tuning (Running {args.n_trials} trials each with 5-Fold GroupKFold CV) ---")
 
     for i, model_name in enumerate(models_to_run):
         print(f"\n--- Tuning {model_name} ---")
 
         needs_scaling = model_name in models_that_need_scaling
-
         study = optuna.create_study(direction='minimize', pruner=MedianPruner(
             n_startup_trials=10, n_warmup_steps=5))
         obj_func = partial(
             objective,
             model_name=model_name,
             needs_scaling=needs_scaling,
-            X_train=X_train,
-            y_train=y_train,
-            X_val=X_val,
-            y_val=y_val
+            X=train_x,
+            y=train_y,
+            groups=train_groups
         )
         study.optimize(obj_func, n_trials=args.n_trials,
                        show_progress_bar=True, n_jobs=-1)
 
         print(
-            f"Finished tuning {model_name}. Best trial RMSE: {study.best_value:.4f}")
+            f"Finished tuning {model_name}. Best trial CV RMSE: {study.best_value:.4f}")
         print(f"Best params: {study.best_params}")
-        # saving the study for future reference if needed
+
         study_path = DATA_DIR / 'models' / f'{model_name}_tuning_study.pkl'
         study_path.parent.mkdir(parents=True, exist_ok=True)
         with open(study_path, 'wb') as f:
             pickle.dump(study, f)
 
-        print(f"Evaluating best model on validation set (for plots/metrics)...")
+        print(f"Retraining {model_name} on full dataset with best params...")
         start_time = time.time()
-        best_model_for_eval = get_model_and_params(
+        best_model_final = get_model_and_params(
             model_name, study.best_trial)
-        best_pipeline_for_eval = create_pipeline(
-            best_model_for_eval, needs_scaling)
+        best_pipeline_final = create_pipeline(
+            best_model_final, needs_scaling)
 
-        best_pipeline_for_eval.fit(X_train, y_train)
-
+        best_pipeline_final.fit(train_x, train_y)
         duration = time.time() - start_time
-        y_pred_val = best_pipeline_for_eval.predict(X_val)
-        metrics = {
-            'RMSE': np.sqrt(mean_squared_error(y_val, y_pred_val)),
-            'MAE': mean_absolute_error(y_val, y_pred_val),
-        }
+
+        best_cv_rmse = study.best_value
+        best_cv_mae = study.best_trial.user_attrs.get("mean_mae", np.nan)
 
         results.append({
             'Model': model_name,
-            'Val RMSE': metrics['RMSE'],
-            'Val MAE': metrics['MAE'],
+            'Val RMSE (CV)': best_cv_rmse,
+            'Val MAE (CV)': best_cv_mae,
             'Fit Time (s)': duration
         })
         print(
-            f"Finished {model_name} in {duration:.2f}s. Validation RMSE: {metrics['RMSE']:.4f}")
-
-        plot_model_results(flat_axes[i], y_val,
-                           y_pred_val, model_name, metrics)
+            f"Finished {model_name} retraining in {duration:.2f}s. Best CV RMSE: {best_cv_rmse:.4f}")
 
         generate_submission_file(
-            best_pipeline_for_eval, true_test_df, test_game_ids, model_name, submission_dir)
+            best_pipeline_final, true_test_df, test_game_ids, model_name, submission_dir)
 
     results_df = pd.DataFrame(results).sort_values(
-        by='Val RMSE', ascending=True)
+        by='Val RMSE (CV)', ascending=True)
 
     print("\n--- Model Comparison Results (Tuned) ---")
     print(results_df.to_string(index=False, float_format="%.4f"))
-
-    print("\nDisplaying prediction histograms...")
-    plt.savefig(DATA_DIR / 'model_tuning_results.png')
-    plt.show()
 
 
 if __name__ == "__main__":
