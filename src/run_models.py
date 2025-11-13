@@ -23,12 +23,12 @@ from catboost import CatBoostRegressor
 
 from .consts import DATA_DIR, SEED, N_TRIALS
 from .feature_engineering import run_feature_engineering
-
+from .util import remove_casual_only_players
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = False, mode: str = 'full') -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Runs feature engineering pipeline on train and test data.
     Args:
@@ -39,8 +39,8 @@ def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = Fa
     """
     if force_run_fe or not train_fe_path.exists() or not test_fe_path.exists():
         print(
-            f"Running feature engineering pipeline{' (forced)' if force_run_fe else ''}...")
-        run_feature_engineering()
+            f"Running {mode} feature engineering pipeline{' (forced)' if force_run_fe else ''}...")
+        run_feature_engineering(mode=mode)
     else:
         print("FE files already exist. Skipping FE pipeline.")
 
@@ -127,7 +127,7 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
 
     elif model_name == 'XGBRegressor':
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'max_depth': trial.suggest_int('max_depth', 3, 10),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
@@ -155,7 +155,12 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
             'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1.0, 10.0, log=True),
             'border_count': trial.suggest_int('border_count', 32, 255),
         }
-        return CatBoostRegressor(**params, random_state=SEED, verbose=0, thread_count=-1)
+        cat_features_list = [
+            'time_control_name', 'game_end_reason', 'rating_mode',
+            'lexicon'
+            ]
+        return CatBoostRegressor(**params, random_state=SEED, verbose=0, thread_count=-1, cat_features=cat_features_list)
+
     elif model_name == 'RandomForestRegressor':
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
@@ -239,21 +244,25 @@ def main():
                         help='Number of trials for hyperparameter tuning.')
     parser.add_argument('--run_fe', action='store_true',
                         help='Run feature engineering pipeline even if files exist.')
+    parser.add_argument('--fe_mode', type=str, default='full',
+                        choices=['full', 'lite', 'cat'],
+                        help='Mode for feature engineering: "full" or "lite".')
+    parser.add_argument('--from_pkl', action='store_true',
+                        help='Load models from pickle files instead of tuning.')
     args = parser.parse_args()
     print("Loading and preprocessing data...")
     train_fe_path = DATA_DIR / 'processed' / 'train_fe_no_bots.csv'
     test_fe_path = DATA_DIR / 'processed' / 'test_fe_no_bots.csv'
     train_df, true_test_df = pre_process(
-        train_fe_path, test_fe_path, force_run_fe=args.run_fe)
-
+        train_fe_path, test_fe_path, force_run_fe=args.run_fe, mode=args.fe_mode)
+    train_df = remove_casual_only_players(train_df)
     cols_to_drop = ['nickname', 'first']
     train_x, train_y, true_test_df, test_game_ids, train_groups = clean_data(
         train_df, true_test_df, cols_to_drop
     )
     print(
         f"Data loaded: {len(train_x)} training samples for CV, {len(true_test_df)} test samples.")
-    # models_to_run = ['Ridge',
-    #  'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
+    # models_to_run = ['Ridge','XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
     models_to_run = ['CatBoostRegressor']
     models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
     submission_dir = DATA_DIR / 'submissions'
@@ -262,9 +271,13 @@ def main():
     print(
         f"\n--- Starting Model Tuning (Running {args.n_trials} trials each with 5-Fold GroupKFold CV) ---")
 
-    for i, model_name in enumerate(models_to_run):
+    for model_name in models_to_run:
         print(f"\n--- Tuning {model_name} ---")
-
+        if model_name == 'CatBoostRegressor':
+            train_fe_cat_path = DATA_DIR / 'processed' / 'train_fe_cat_no_bots.csv'
+            test_fe_cat_path = DATA_DIR / 'processed' / 'test_fe_cat_no_bots.csv'
+            train_df, true_test_df = pre_process(
+                train_fe_cat_path, test_fe_cat_path, force_run_fe=args.run_fe, mode='cat')
         needs_scaling = model_name in models_that_need_scaling
         study = optuna.create_study(direction='minimize', pruner=MedianPruner(
             n_startup_trials=10, n_warmup_steps=5))

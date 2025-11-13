@@ -1,3 +1,4 @@
+from collections import Counter
 import time
 from typing import List, Tuple
 
@@ -8,7 +9,7 @@ from sklearn.preprocessing import FunctionTransformer
 from textstat import textstat
 
 from src.config import DATA_DIR, BOTS, PAST_WINDOWS_SIZES
-from src.util import add_ohe_to_df, merge_with_another_df, impute_missing_with_empty_string, calculate_rack_value, save_processed_file
+from src.util import add_ohe_to_df, merge_with_another_df, impute_missing_with_empty_string, calculate_rack_value, save_processed_file, get_rack_left
 
 
 def add_casual_only_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -525,7 +526,116 @@ def add_textstat_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFr
     return df
 
 
-def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
+def add_average_word_length_feature(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds a feature for the average word length used by the player in the game.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'move' columns.
+    Returns:
+        pd.DataFrame: Dataframe with new column 'average_word_length'.
+    """
+    df = df.copy()
+    turns_df = turns_df[['game_id', 'nickname', 'turn_type', 'move']].copy()
+
+    play_turns = turns_df[turns_df['turn_type'] == 'Play'].copy()
+    play_turns['word_length'] = play_turns['move'].apply(
+        lambda x: len(str(x).replace('.', '').replace(
+            '?', '').replace(' ', ''))
+    )
+    word_length_stats = play_turns.groupby(['game_id', 'nickname'])['word_length'].agg(
+        average_word_length='mean'
+    ).reset_index()
+    df = df.merge(word_length_stats, on=[
+                  'game_id', 'nickname'], how='left')
+    df['average_word_length'] = df['average_word_length'].fillna(0)
+    return df
+
+
+def add_first_n_moves_points_feature(df: pd.DataFrame, turns_df: pd.DataFrame, n: List[int]) -> pd.DataFrame:
+    """
+    Adds features for the total points scored by the player in the first N moves of the game.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', 'turn_number', and 'points' columns.
+        n (List[int]): List of N values for which to calculate the total points.
+    Returns:
+        pd.DataFrame: Dataframe with new columns for each N in n: 'first_{N}_moves_points'.
+    """
+    df = df.copy()
+    turns_df = turns_df[['game_id', 'nickname',
+                         'turn_number', 'points']].copy()
+
+    for window in n:
+        first_n_turns = turns_df[turns_df['turn_number'] <= window]
+        first_n_points = first_n_turns.groupby(
+            ['game_id', 'nickname'])['points'].sum().reset_index()
+        first_n_points.rename(
+            columns={'points': f'first_{window}_moves_points'}, inplace=True)
+        df = df.merge(first_n_points, on=[
+                      'game_id', 'nickname'], how='left')
+        df[f'first_{window}_moves_points'] = df[f'first_{window}_moves_points'].fillna(
+            0).astype(int)
+
+    return df
+
+
+def add_rack_left_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds features related to the letters left on the player's rack after each play.
+    Features Added: 
+    - rack_left_value: The average point value of the tiles left 
+                            on the rack after each play.
+    - avg_left_vowel_count: Average vowels left on rack.
+    - avg_left_consonant_count: Average consonants left on rack.
+
+    Args:
+        df (pd.DataFrame): Input dataframe with 'game_id', 'nickname'.
+        turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', 
+                                 'turn_type', 'rack', and 'move' columns.
+
+    Returns:
+        pd.DataFrame: Dataframe with new rack left features.
+    """
+    df = df.copy()
+    play_turns = turns_df[turns_df['turn_type'] == 'Play'].copy()
+
+    play_turns['rack_left'] = play_turns.apply(
+        lambda row: get_rack_left(row['rack'], row['move']), axis=1
+    )
+
+    play_turns['rack_left_value'] = play_turns['rack_left'].apply(
+        calculate_rack_value)
+    play_turns['left_vowel_count'] = play_turns['rack_left'].apply(
+        lambda x: sum(1 for c in str(x).upper() if c in 'AEOUI')
+    )
+    play_turns['left_consonant_count'] = play_turns['rack_left'].apply(
+        lambda x: sum(1 for c in str(x).upper()
+                      if c.isalpha() and c not in 'AEOUI')
+    )
+
+    left_stats = play_turns.groupby(['game_id', 'nickname']).agg(
+        avg_rack_left_value=('rack_left_value', 'mean'),
+        std_rack_left_value=('rack_left_value', 'std'),
+        max_rack_left_value=('rack_left_value', 'max'),
+        avg_left_vowel_count=('left_vowel_count', 'mean'),
+        avg_left_consonant_count=('left_consonant_count', 'mean')
+    ).reset_index()
+
+    df = df.merge(left_stats, on=['game_id', 'nickname'], how='left')
+
+    fill_cols = [
+        'avg_rack_left_value', 'std_rack_left_value', 'max_rack_left_value',
+        'avg_left_vowel_count', 'avg_left_consonant_count'
+    ]
+    for col in fill_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
+
+    return df
+
+
+def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame, mode: str = 'full') -> Tuple[Pipeline, pd.DataFrame]:
     """
     Builds the feature engineering pipeline. 
     Args:
@@ -534,6 +644,7 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
     Returns:
         Tuple[Pipeline, pd.DataFrame]: Feature engineering pipeline and processed turns_df.
     """
+    print(f'Building feature engineering pipeline in {mode} mode...')
     turns_df = impute_missing_with_empty_string(turns_df, ['rack', 'location'])
 
     pipeline = Pipeline([
@@ -558,9 +669,9 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_past_window_features', FunctionTransformer(
             lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
         ('add_rest_of_ohe', FunctionTransformer(
-            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'rating_mode','lexicon']))),
+            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'rating_mode', 'lexicon']) if mode == 'full' else df)),
         ('drop_unused_cols', FunctionTransformer(
-            lambda df: df.drop(columns=['created_at','day_of_week']))),
+            lambda df: df.drop(columns=['created_at', 'day_of_week']))),
         ('add_score_margin', FunctionTransformer(add_score_margin_features)),
         ('add_pacing_features', FunctionTransformer(
             lambda df: add_pacing_features(df, turns_df))),
@@ -568,13 +679,58 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_rack_value_features(df, turns_df))),
         ('add_lead_features', FunctionTransformer(
             lambda df: add_lead_features(df, turns_df))),
-        ('add_textstat_features', FunctionTransformer(
-            lambda df: add_textstat_features(df, turns_df))),
+        # ('add_textstat_features', FunctionTransformer(
+        #     lambda df: add_textstat_features(df, turns_df))),
+        ('add_average_word_length', FunctionTransformer(
+            lambda df: add_average_word_length_feature(df, turns_df))),
+        ('add_first_n_moves_points', FunctionTransformer(
+            lambda df: add_first_n_moves_points_feature(df, turns_df, n=[3, 5, 7]))),
+        ('add_rack_left_features', FunctionTransformer(
+            lambda df: add_rack_left_features(df, turns_df))),
     ])
     return pipeline, turns_df
 
 
-def run_feature_engineering():
+def build_lite_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame, mode) -> Tuple[Pipeline, pd.DataFrame]:
+    """
+    Builds a lighter version of the feature engineering pipeline.
+    Args:
+        games_df (pd.DataFrame): Games dataframe.
+        turns_df (pd.DataFrame): Turns dataframe.
+    Returns:
+        Tuple[Pipeline, pd.DataFrame]: Feature engineering pipeline and processed turns_df.
+    """
+    turns_df = impute_missing_with_empty_string(turns_df, ['rack', 'location'])
+
+    pipeline = Pipeline([
+        ('merge_games', FunctionTransformer(
+            lambda df: merge_with_another_df(df, games_df, on='game_id'))),
+        ('add_casual_flag', FunctionTransformer(add_casual_only_flag)),
+        ('add_went_first', FunctionTransformer(went_first)),
+        ('add_avg_points', FunctionTransformer(
+            lambda df: add_points_per_game_stats(df, turns_df))),
+        ('add_bot_type', FunctionTransformer(add_bot_type)),
+        ('add_time_features', FunctionTransformer(
+            lambda df: add_time_related_features(df, 'created_at'))),
+        ('add_game_variant', FunctionTransformer(add_game_variant_feature)),
+        ('add_number_of_bingos', FunctionTransformer(
+            lambda df: add_bingo_proxy_feature(df, turns_df))),
+        ('add_overall_player_stats', FunctionTransformer(
+            lambda df: add_overall_player_stats(df, turns_df))),
+        ('add_past_window_features', FunctionTransformer(
+            lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
+        ('add_rest_of_ohe', FunctionTransformer(
+            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'rating_mode', 'lexicon']) if mode == 'full' else df)),
+        ('drop_unused_cols', FunctionTransformer(
+            lambda df: df.drop(columns=['created_at', 'day_of_week']))),
+        ('add_score_margin', FunctionTransformer(add_score_margin_features)),
+        ('add_pacing_features', FunctionTransformer(
+            lambda df: add_pacing_features(df, turns_df))),
+    ])
+    return pipeline, turns_df
+
+
+def run_feature_engineering(mode: str = 'full'):
     """
     Main function to run the feature engineering pipeline.
     """
@@ -583,9 +739,13 @@ def run_feature_engineering():
     turns_df = pd.read_csv(DATA_DIR / 'raw' / 'turns.csv')
     train_df = pd.read_csv(DATA_DIR / 'raw' / 'train.csv')
     test_df = pd.read_csv(DATA_DIR / 'raw' / 'test.csv')
-
-    fe_pipeline, turns_df = build_feature_pipeline(games_df, turns_df)
-
+    if mode == 'full' or mode == 'cat':
+        fe_pipeline, turns_df = build_feature_pipeline(
+            games_df, turns_df, mode)
+    elif mode == 'lite':
+        fe_pipeline, turns_df = build_lite_feature_pipeline(games_df, turns_df)
+    else:
+        raise ValueError("Invalid mode. Choose 'full' or 'lite'.")
     train_df_fe = fe_pipeline.fit_transform(train_df)
     test_df_fe = fe_pipeline.transform(test_df)
     print(f'{'-'*20} train_df_shape: {train_df_fe.shape} {'-'*20}')
@@ -599,6 +759,6 @@ def run_feature_engineering():
     train_no_bots = train_df_fe[~train_df_fe['nickname'].isin(BOTS)]
     test_no_bots = test_df_fe[~test_df_fe['nickname'].isin(BOTS)]
     save_processed_file(train_no_bots, DATA_DIR /
-                        'processed' / 'train_fe_no_bots.csv')
+                        'processed' / f'train_fe_cat_no_bots.csv')
     save_processed_file(test_no_bots, DATA_DIR /
-                        'processed' / 'test_fe_no_bots.csv')
+                        'processed' / f'test_fe_cat_no_bots.csv')

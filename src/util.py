@@ -133,3 +133,28 @@ def remove_casual_only_players(df: pd.DataFrame) -> pd.DataFrame:
     rows_removed = initial_rows - df.shape[0]
     print(f"Removed {rows_removed} rows belonging to casual-only players.")
     return df
+
+
+def get_rack_left(rack_before: str, move: str) -> str:
+    """
+    Helper function to calculate the tiles left on the rack after a move.
+
+    Assumes:
+    - rack_before: All tiles on the rack (e.g., 'AEINRS?')
+    - move: The move string (e.g., 'tA.kI?S')
+    - Tiles from rack are UPPERCASE or '?'
+    - Tiles from board are lowercase or '.'
+    """
+    try:
+        rack_list = list(rack_before)
+        tiles_played = [c for c in move if c.isupper() or c == '?']
+
+        for tile in tiles_played:
+            if tile in rack_list:
+                rack_list.remove(tile)
+            else:
+                # This should'nt happen
+                pass
+        return "".join(rack_list)
+    except Exception:
+        return ""
