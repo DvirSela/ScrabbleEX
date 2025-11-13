@@ -1,10 +1,11 @@
 from typing import List
+from pathlib import Path
 
 import pandas as pd
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.impute import SimpleImputer
 
-from src.consts import SCRABBLE_LETTER_VALUES
+from src.config import SCRABBLE_LETTER_VALUES
 
 
 def add_ohe_to_df(df: pd.DataFrame, cols_name: List[str], drop_original: bool = True) -> pd.DataFrame:
@@ -93,3 +94,42 @@ def calculate_rack_value(rack_str: str) -> int:
         int: Total point value of the rack.
     """
     return sum(SCRABBLE_LETTER_VALUES.get(letter.upper(), 0) for letter in rack_str)
+
+
+def save_processed_file(df: pd.DataFrame, path: str):
+    """
+    Saves the processed dataframe to a CSV file, creating directories if they do not exist.
+    Args:
+        df (pd.DataFrame): Dataframe to save.
+        path (str): Path to save the CSV file (including filename).
+    Raises:
+        OSError: If there is an error creating directories or saving the file.
+    """
+    try:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_path, index=False)
+    except OSError as e:
+        print(f"Error saving file to {path}: {e}")
+
+
+def remove_casual_only_players(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Removes all rows for players who have only played casual games.
+    Assumes that the 'casual_only_player' column is already present in df.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'casual_only_player' column.
+    Raises:
+        ValueError: If 'casual_only_player' column is not found in the dataframe.
+    Returns:
+        pd.DataFrame: Dataframe with casual-only players filtered out.
+    """
+    if 'casual_only_player' not in df.columns:
+        raise ValueError(
+            "The dataframe must contain a 'casual_only_player' column.")
+    df = df.copy()
+    initial_rows = df.shape[0]
+    df = df[df['casual_only_player'] == 0].reset_index(drop=True)
+    rows_removed = initial_rows - df.shape[0]
+    print(f"Removed {rows_removed} rows belonging to casual-only players.")
+    return df

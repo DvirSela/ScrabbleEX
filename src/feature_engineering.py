@@ -1,16 +1,14 @@
 import time
 from typing import List, Tuple
-from pathlib import Path
 
 import pandas as pd
 import numpy as np
-from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
+from sklearn.preprocessing import FunctionTransformer
 from textstat import textstat
 
-from src.consts import DATA_DIR, BOTS, SCRABBLE_LETTER_VALUES, PAST_WINDOWS_SIZES
-from src.util import add_ohe_to_df, merge_with_another_df, impute_missing_with_empty_string, calculate_rack_value
+from src.config import DATA_DIR, BOTS, PAST_WINDOWS_SIZES
+from src.util import add_ohe_to_df, merge_with_another_df, impute_missing_with_empty_string, calculate_rack_value, save_processed_file
 
 
 def add_casual_only_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -33,14 +31,14 @@ def add_casual_only_flag(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds a feature for each game and player indicating the total number of letters he used on the board (so not from his rack).
+    Adds a feature for each game and player indicating the mean number of letters he used on the board (so not from his rack).
     These letters are calculated from the 'move' column in turns_df, and are indicated by lowercase letters and '.'s.
     This calculation is ONLY performed for turns where turn_type == 'Play'.
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
         turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'move' columns.
     Returns:
-        pd.DataFrame: Dataframe with new column 'total_board_letters_used'.
+        pd.DataFrame: Dataframe with new column 'mean_board_letters_used'.
     """
     df = df.copy()
     turns_df = turns_df[['game_id', 'nickname', 'turn_type', 'move']].copy()
@@ -51,12 +49,12 @@ def add_board_letters_used(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataF
         lambda x: str(x).count(".") + sum(int(c.islower()) for c in str(x))
     )
     player_board_letters = turns_df.groupby(['game_id', 'nickname'])[
-        'board_letters_used'].sum().reset_index()
+        'board_letters_used'].mean().reset_index()
     player_board_letters.rename(
-        columns={'board_letters_used': 'total_board_letters_used'}, inplace=True)
+        columns={'board_letters_used': 'mean_board_letters_used'}, inplace=True)
     df = df.merge(player_board_letters, on=['game_id', 'nickname'], how='left')
 
-    df['total_board_letters_used'] = df['total_board_letters_used'].fillna(
+    df['mean_board_letters_used'] = df['mean_board_letters_used'].fillna(
         0).astype(int)
     return df
 
@@ -101,8 +99,7 @@ def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Da
 
 def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds a one hot encoded feature for bot type and a numeric 'opponent_bot_strength'.
-    The strength ordering follows the order in BOTS (index+1). Non-bot opponents -> 0.
+    Adds a one hot encoded feature for bot type.
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
     Returns:
@@ -112,11 +109,8 @@ def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
     bot_rows = df[df['nickname'].isin(BOTS)]
     bot_map = bot_rows.set_index('game_id')['nickname']
     df.loc[:, 'opponent_bot'] = df['game_id'].map(bot_map)
-
-    strength_map = {bot: idx + 1 for idx, bot in enumerate(BOTS)}
-    df['opponent_bot_strength'] = df['opponent_bot'].map(
-        strength_map).fillna(0).astype(int)
     df = add_ohe_to_df(df, ['opponent_bot'])
+
     return df
 
 
@@ -174,15 +168,21 @@ def add_game_variant_feature(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_bingo_proxy_feature(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds a feature for the number of bingos played by each player in each game.
-    A bingo is defined as a move that uses all 7 letters from the player's rack, and is awarded a 50-point bonus.
+    Adds a feature for the ratio of turns that are bingos played by each player in each game.
+    A bingo is defined as a move that uses all 7 letters from the player's rack, 
+    and is awarded a 50-point bonus.
+
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
         turns_df (pd.DataFrame): Turns dataframe with 'game_id', 'nickname', and 'move' columns.
+
     Returns:
-        pd.DataFrame: Dataframe with new column 'number_of_bingos'.
+        pd.DataFrame: Dataframe with new column 'bingo_ratio'.
     """
     df = df.copy()
+
+    total_turns = turns_df.groupby(
+        ['game_id', 'nickname']).size().reset_index(name='total_turns')
     is_bingo_proxy = (turns_df['points'] > 50) & (
         turns_df['turn_type'] == 'Play')
     bingo_counts = (
@@ -191,12 +191,19 @@ def add_bingo_proxy_feature(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Data
         .size()
         .rename(columns={'size': 'bingo_count'})
     )
+    df = df.merge(total_turns, on=['game_id', 'nickname'], how='left')
+
+    df['total_turns'] = df['total_turns'].fillna(0)
     df = df.merge(
         bingo_counts,
         on=['game_id', 'nickname'],
         how='left'
     )
     df['bingo_count'] = df['bingo_count'].fillna(0).astype(int)
+    df['bingo_ratio'] = np.where(
+        df['total_turns'] > 0, df['bingo_count'] / df['total_turns'], 0)
+    df = df.drop(columns=['total_turns', 'bingo_count'])
+
     return df
 
 
@@ -279,7 +286,7 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
     This function MUST be called after the following features have been added to df:
     - 'created_at' and 'winner' (from 'merge_with_games')
     - 'avg_points_per_game' (from 'add_points_per_game_stats')
-    - 'bingo_count' (from 'add_bingo_proxy_feature')
+    - 'bingo_ratio' (from 'add_bingo_proxy_feature')
 
     Args:
         df (pd.DataFrame): Input dataframe with per-game stats.
@@ -301,7 +308,7 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
     grouped = df.groupby('nickname', sort=False)
 
     df['past_avg_points'] = grouped['avg_points_per_game'].shift(1)
-    df['past_bingo_count'] = grouped['bingo_count'].shift(1)
+    df['past_bingo_ratio'] = grouped['bingo_ratio'].shift(1)
     df['past_is_win'] = grouped['is_win'].shift(1)
 
     for window in past_windows:
@@ -327,14 +334,13 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
         df[f'past_{window}_num_games'] = rolling_obj('past_is_win').count(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
-        # .sum() adds up the bingos/wins in the window
-        df[f'past_{window}_num_bingos'] = rolling_obj('past_bingo_count').sum(
-        ).reset_index(level=0, drop=True).fillna(0).astype(int)
+        df[f'past_{window}_avg_bingo_ratio'] = rolling_obj(
+            'past_bingo_ratio').mean().reset_index(level=0, drop=True).fillna(0)
         df[f'past_{window}_num_wins'] = rolling_obj('past_is_win').sum(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
     df = df.drop(columns=['past_avg_points',
-                 'past_bingo_count', 'past_is_win'])
+                 'past_bingo_ratio', 'past_is_win'])
     df = df.sort_index()
 
     return df
@@ -521,7 +527,7 @@ def add_textstat_features(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.DataFr
 
 def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tuple[Pipeline, pd.DataFrame]:
     """
-    Builds the feature engineering pipeline.
+    Builds the feature engineering pipeline. 
     Args:
         games_df (pd.DataFrame): Games dataframe.
         turns_df (pd.DataFrame): Turns dataframe.
@@ -552,9 +558,9 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
         ('add_past_window_features', FunctionTransformer(
             lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
         ('add_rest_of_ohe', FunctionTransformer(
-            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'lexicon', 'rating_mode', 'day_of_week']))),
+            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'rating_mode','lexicon']))),
         ('drop_unused_cols', FunctionTransformer(
-            lambda df: df.drop(columns=['created_at', 'winner']))),
+            lambda df: df.drop(columns=['created_at','day_of_week']))),
         ('add_score_margin', FunctionTransformer(add_score_margin_features)),
         ('add_pacing_features', FunctionTransformer(
             lambda df: add_pacing_features(df, turns_df))),
@@ -566,23 +572,6 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame) -> Tu
             lambda df: add_textstat_features(df, turns_df))),
     ])
     return pipeline, turns_df
-
-
-def save_processed_file(df: pd.DataFrame, path: str):
-    """
-    Saves the processed dataframe to a CSV file, creating directories if they do not exist.
-    Args:
-        df (pd.DataFrame): Dataframe to save.
-        path (str): Path to save the CSV file (including filename).
-    Raises:
-        OSError: If there is an error creating directories or saving the file.
-    """
-    try:
-        output_path = Path(path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(output_path, index=False)
-    except OSError as e:
-        print(f"Error saving file to {path}: {e}")
 
 
 def run_feature_engineering():

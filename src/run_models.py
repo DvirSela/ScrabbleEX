@@ -3,12 +3,13 @@ from pathlib import Path
 from typing import Tuple, Dict, Any, List
 from functools import partial
 import pickle
+import argparse
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import optuna
-
+from optuna.pruners import MedianPruner
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -27,7 +28,7 @@ from .feature_engineering import run_feature_engineering
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-def pre_process(train_fe_path: Path, test_fe_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Runs feature engineering pipeline on train and test data.
     Args:
@@ -36,8 +37,9 @@ def pre_process(train_fe_path: Path, test_fe_path: Path) -> Tuple[pd.DataFrame, 
     Returns:
         Tuple[pd.DataFrame, pd.DataFrame]: A tuple of train and test data after feature engineering
     """
-    if not train_fe_path.exists() or not test_fe_path.exists():
-        print("Running feature engineering pipeline...")
+    if force_run_fe or not train_fe_path.exists() or not test_fe_path.exists():
+        print(
+            f"Running feature engineering pipeline{' (forced)' if force_run_fe else ''}...")
         run_feature_engineering()
     else:
         print("FE files already exist. Skipping FE pipeline.")
@@ -130,7 +132,7 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
             'gamma': trial.suggest_float('gamma', 0, 5),
         }
-        return XGBRegressor(**params, random_state=SEED, n_jobs=-1)
+        return XGBRegressor(**params, random_state=SEED, n_jobs=-1, enable_categorical=False)
 
     elif model_name == 'LGBMRegressor':
         params = {
@@ -145,13 +147,13 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
 
     elif model_name == 'CatBoostRegressor':
         params = {
-            'iterations': trial.suggest_int('iterations', 100, 1000),
+            'iterations': trial.suggest_int('iterations', 100, 500),
             'depth': trial.suggest_int('depth', 3, 10),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
             'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1.0, 10.0, log=True),
             'border_count': trial.suggest_int('border_count', 32, 255),
         }
-        return CatBoostRegressor(**params, random_state=SEED, verbose=0)
+        return CatBoostRegressor(**params, random_state=SEED, verbose=0, thread_count=-1)
     elif model_name == 'RandomForestRegressor':
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
@@ -244,10 +246,18 @@ def main():
     """
     Main function to run the full tuning, training, and evaluation pipeline.
     """
+    parser = argparse.ArgumentParser(
+        description="Run model tuning and evaluation pipeline.")
+    parser.add_argument('--n_trials', type=int, default=N_TRIALS,
+                        help='Number of trials for hyperparameter tuning.')
+    parser.add_argument('--run_fe', action='store_true',
+                        help='Run feature engineering pipeline even if files exist.')
+    args = parser.parse_args()
     print("Loading and preprocessing data...")
     train_fe_path = DATA_DIR / 'processed' / 'train_fe_no_bots.csv'
     test_fe_path = DATA_DIR / 'processed' / 'test_fe_no_bots.csv'
-    train_df, true_test_df = pre_process(train_fe_path, test_fe_path)
+    train_df, true_test_df = pre_process(
+        train_fe_path, test_fe_path, force_run_fe=args.run_fe)
 
     cols_to_drop = ['nickname', 'first']
     train_x, train_y, true_test_df, test_game_ids = clean_data(
@@ -259,8 +269,9 @@ def main():
     print(
         f"Data split: {len(X_train)} for tuning-train, {len(X_val)} for tuning-validation")
 
-    models_to_run = ['Ridge', 'KNeighborsRegressor',
-                     'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor', 'RandomForestRegressor']
+    # models_to_run = ['Ridge',
+    #  'XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
+    models_to_run = ['CatBoostRegressor']
     models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
     submission_dir = DATA_DIR / 'submissions'
 
@@ -268,14 +279,16 @@ def main():
     fig, axes = plt.subplots(3, 2, figsize=(18, 15))
     flat_axes = axes.flatten()
 
-    print(f"\n--- Starting Model Tuning (Running {N_TRIALS} trials each) ---")
+    print(
+        f"\n--- Starting Model Tuning (Running {args.n_trials} trials each) ---")
 
     for i, model_name in enumerate(models_to_run):
         print(f"\n--- Tuning {model_name} ---")
 
         needs_scaling = model_name in models_that_need_scaling
 
-        study = optuna.create_study(direction='minimize')
+        study = optuna.create_study(direction='minimize', pruner=MedianPruner(
+            n_startup_trials=10, n_warmup_steps=5))
         obj_func = partial(
             objective,
             model_name=model_name,
@@ -285,7 +298,8 @@ def main():
             X_val=X_val,
             y_val=y_val
         )
-        study.optimize(obj_func, n_trials=N_TRIALS, show_progress_bar=True)
+        study.optimize(obj_func, n_trials=args.n_trials,
+                       show_progress_bar=True, n_jobs=-1)
 
         print(
             f"Finished tuning {model_name}. Best trial RMSE: {study.best_value:.4f}")
