@@ -1,6 +1,7 @@
 from collections import Counter
 import time
 from typing import List, Tuple
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
@@ -282,21 +283,21 @@ def add_overall_player_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Dat
 
 def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) -> pd.DataFrame:
     """
-    Calculates the player's history of games statistics over N past games.
+    Calculates the player's history of RATED games statistics over N past games.
 
     This function MUST be called after the following features have been added to df:
     - 'created_at' and 'winner' (from 'merge_with_games')
     - 'avg_points_per_game' (from 'add_points_per_game_stats')
     - 'bingo_ratio' (from 'add_bingo_proxy_feature')
+    - 'rating_mode' (from 'merge_with_games')
 
     Args:
         df (pd.DataFrame): Input dataframe with per-game stats.
         past_windows (List[int]): List of past windows (e.g., [5, 10]).
 
     Returns:
-        pd.DataFrame: Dataframe with new past-window features.
+        pd.DataFrame: Dataframe with new past-window features for RATED games.
     """
-    # This was written with the help of gemini-2.5
     df = df.copy()
 
     df['is_human'] = (~df['nickname'].isin(BOTS)).astype(int)
@@ -305,12 +306,26 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
     df['is_win'] = (human_win_condition | bot_win_condition).astype(int)
     df = df.drop(columns=['is_human'])
 
+    df['avg_points_per_game_rated'] = df.where(
+        df['rating_mode'] == 'RATED'
+    )['avg_points_per_game']
+    
+    df['bingo_ratio_rated'] = df.where(
+        df['rating_mode'] == 'RATED'
+    )['bingo_ratio']
+    
+    df['is_win_rated'] = df.where(
+        df['rating_mode'] == 'RATED'
+    )['is_win']
+
     df = df.sort_values(by=['nickname', 'created_at'])
     grouped = df.groupby('nickname', sort=False)
 
-    df['past_avg_points'] = grouped['avg_points_per_game'].shift(1)
-    df['past_bingo_ratio'] = grouped['bingo_ratio'].shift(1)
-    df['past_is_win'] = grouped['is_win'].shift(1)
+    # --- Create "past" (shifted) columns ---
+    # These will be the "past N RATED games"
+    df['past_avg_points_rated'] = grouped['avg_points_per_game_rated'].shift(1)
+    df['past_bingo_ratio_rated'] = grouped['bingo_ratio_rated'].shift(1)
+    df['past_is_win_rated'] = grouped['is_win_rated'].shift(1)
 
     for window in past_windows:
         # Create a new groupby object (on the sorted df)
@@ -318,30 +333,41 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
         grouped_past = df.groupby('nickname', sort=False)
 
         # Define the rolling window function. min_periods=1 ensures we get
-        # stats even if the player has played fewer than 'window' games.
+        # stats even if the player has played fewer than 'window' RATED games.
+        # The .rolling() function correctly skips NaN (CASUAL) values.
         def rolling_obj(col):
             return grouped_past[col].rolling(window=window, min_periods=1)
 
-        # Points stats
-        df[f'past_{window}_avg_points'] = rolling_obj(
-            'past_avg_points').mean().reset_index(level=0, drop=True).fillna(0)
-        df[f'past_{window}_min_points'] = rolling_obj(
-            'past_avg_points').min().reset_index(level=0, drop=True).fillna(0)
-        df[f'past_{window}_max_points'] = rolling_obj(
-            'past_avg_points').max().reset_index(level=0, drop=True).fillna(0)
+        # --- Points stats (RATED) ---
+        df[f'past_{window}_avg_points_rated'] = rolling_obj(
+            'past_avg_points_rated').mean().reset_index(level=0, drop=True).fillna(0)
+        df[f'past_{window}_min_points_rated'] = rolling_obj(
+            'past_avg_points_rated').min().reset_index(level=0, drop=True).fillna(0)
+        df[f'past_{window}_max_points_rated'] = rolling_obj(
+            'past_avg_points_rated').max().reset_index(level=0, drop=True).fillna(0)
 
-        # Count stats
-        # .count() counts the non-NaN 'past_is_win' values in the window
-        df[f'past_{window}_num_games'] = rolling_obj('past_is_win').count(
+        # --- Count stats (RATED) ---
+        # .count() counts the non-NaN 'past_is_win_rated' values (i.e., past RATED games)
+        df[f'past_{window}_num_rated_games'] = rolling_obj('past_is_win_rated').count(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
-        df[f'past_{window}_avg_bingo_ratio'] = rolling_obj(
-            'past_bingo_ratio').mean().reset_index(level=0, drop=True).fillna(0)
-        df[f'past_{window}_num_wins'] = rolling_obj('past_is_win').sum(
+        df[f'past_{window}_avg_bingo_ratio_rated'] = rolling_obj(
+            'past_bingo_ratio_rated').mean().reset_index(level=0, drop=True).fillna(0)
+        
+        # .sum() sums the 'past_is_win_rated' values (1s for wins, 0s for losses)
+        df[f'past_{window}_num_rated_wins'] = rolling_obj('past_is_win_rated').sum(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
-    df = df.drop(columns=['past_avg_points',
-                 'past_bingo_ratio', 'past_is_win'])
+        # --- Win Rate (RATED) ---
+        df[f'past_{window}_rated_win_rate'] = (
+            df[f'past_{window}_num_rated_wins'] / df[f'past_{window}_num_rated_games']
+        ).fillna(0) # fillna(0) for cases where num_rated_games is 0
+
+    # --- Clean up intermediate columns ---
+    df = df.drop(columns=[
+        'is_win', 'avg_points_per_game_rated', 'bingo_ratio_rated', 'is_win_rated',
+        'past_avg_points_rated', 'past_bingo_ratio_rated', 'past_is_win_rated'
+    ])
     df = df.sort_index()
 
     return df
@@ -762,3 +788,36 @@ def run_feature_engineering(mode: str = 'full'):
                         'processed' / f'train_fe_cat_no_bots.csv')
     save_processed_file(test_no_bots, DATA_DIR /
                         'processed' / f'test_fe_cat_no_bots.csv')
+
+
+def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = False, mode: str = 'full') -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Runs feature engineering pipeline on train and test data.
+    Args:
+        train_fe_path (str): Path to train fe
+        test_fe_path (str):  Path to test fe
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame]: A tuple of train and test data after feature engineering
+    """
+    if force_run_fe or not train_fe_path.exists() or not test_fe_path.exists():
+        print(
+            f"Running {mode} feature engineering pipeline{' (forced)' if force_run_fe else ''}...")
+        run_feature_engineering(mode=mode)
+    else:
+        print("FE files already exist. Skipping FE pipeline.")
+
+    train_df_fe = pd.read_csv(train_fe_path)
+    test_df_fe = pd.read_csv(test_fe_path)
+
+    if 'rating' not in train_df_fe.columns:
+        raise ValueError("The train file is missing the 'rating' column.")
+
+    train_cols = set(train_df_fe.drop(columns=['rating']).columns)
+    test_cols = set(test_df_fe.columns)
+
+    shared_features = list(train_cols.intersection(test_cols))
+
+    test_df_fe = test_df_fe[shared_features]
+    train_df_fe = train_df_fe[shared_features + ['rating']]
+
+    return train_df_fe, test_df_fe

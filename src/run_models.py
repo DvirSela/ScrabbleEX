@@ -22,43 +22,10 @@ from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 
 from .consts import DATA_DIR, SEED, N_TRIALS
-from .feature_engineering import run_feature_engineering
+from .feature_engineering import pre_process
 from .util import remove_casual_only_players
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-
-def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = False, mode: str = 'full') -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Runs feature engineering pipeline on train and test data.
-    Args:
-        train_fe_path (str): Path to train fe
-        test_fe_path (str):  Path to test fe
-    Returns:
-        Tuple[pd.DataFrame, pd.DataFrame]: A tuple of train and test data after feature engineering
-    """
-    if force_run_fe or not train_fe_path.exists() or not test_fe_path.exists():
-        print(
-            f"Running {mode} feature engineering pipeline{' (forced)' if force_run_fe else ''}...")
-        run_feature_engineering(mode=mode)
-    else:
-        print("FE files already exist. Skipping FE pipeline.")
-
-    train_df_fe = pd.read_csv(train_fe_path)
-    test_df_fe = pd.read_csv(test_fe_path)
-
-    if 'rating' not in train_df_fe.columns:
-        raise ValueError("The train file is missing the 'rating' column.")
-
-    train_cols = set(train_df_fe.drop(columns=['rating']).columns)
-    test_cols = set(test_df_fe.columns)
-
-    shared_features = list(train_cols.intersection(test_cols))
-
-    test_df_fe = test_df_fe[shared_features]
-    train_df_fe = train_df_fe[shared_features + ['rating']]
-
-    return train_df_fe, test_df_fe
 
 
 def clean_data(train_df: pd.DataFrame, test_df: pd.DataFrame, cols_to_drop: List[str]) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.Series]:
@@ -158,7 +125,7 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
         cat_features_list = [
             'time_control_name', 'game_end_reason', 'rating_mode',
             'lexicon'
-            ]
+        ]
         return CatBoostRegressor(**params, random_state=SEED, verbose=0, thread_count=-1, cat_features=cat_features_list)
 
     elif model_name == 'RandomForestRegressor':
@@ -246,10 +213,11 @@ def main():
                         help='Run feature engineering pipeline even if files exist.')
     parser.add_argument('--fe_mode', type=str, default='full',
                         choices=['full', 'lite', 'cat'],
-                        help='Mode for feature engineering: "full" or "lite".')
+                        help='Mode for feature engineering: "full" or "lite" or "cat".')
     parser.add_argument('--from_pkl', action='store_true',
                         help='Load models from pickle files instead of tuning.')
     args = parser.parse_args()
+
     print("Loading and preprocessing data...")
     train_fe_path = DATA_DIR / 'processed' / 'train_fe_no_bots.csv'
     test_fe_path = DATA_DIR / 'processed' / 'test_fe_no_bots.csv'
@@ -257,12 +225,19 @@ def main():
         train_fe_path, test_fe_path, force_run_fe=args.run_fe, mode=args.fe_mode)
     train_df = remove_casual_only_players(train_df)
     cols_to_drop = ['nickname', 'first']
-    train_x, train_y, true_test_df, test_game_ids, train_groups = clean_data(
-        train_df, true_test_df, cols_to_drop
-    )
-    print(
-        f"Data loaded: {len(train_x)} training samples for CV, {len(true_test_df)} test samples.")
-    # models_to_run = ['Ridge','XGBRegressor', 'LGBMRegressor', 'CatBoostRegressor']
+
+    if args.from_pkl:
+        print("Running from cached model pipelines...")
+        train_x, train_y, true_test_df, test_game_ids, train_groups = clean_data(
+            train_df, true_test_df, cols_to_drop)
+        submission_dir = DATA_DIR / 'submissions'
+        pkl_model = 'CatBoostRegressor_tuning_study_new 102.pkl'
+        pkl_path = DATA_DIR / 'models' / pkl_model
+
+        run_from_cached(pkl_path, true_test_df, test_game_ids, submission_dir,
+                        train_x, train_y)
+        return
+
     models_to_run = ['CatBoostRegressor']
     models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
     submission_dir = DATA_DIR / 'submissions'
@@ -278,9 +253,13 @@ def main():
             test_fe_cat_path = DATA_DIR / 'processed' / 'test_fe_cat_no_bots.csv'
             train_df, true_test_df = pre_process(
                 train_fe_cat_path, test_fe_cat_path, force_run_fe=args.run_fe, mode='cat')
+            train_df = remove_casual_only_players(train_df)
+        train_x, train_y, true_test_df, test_game_ids, train_groups = clean_data(
+            train_df, true_test_df, cols_to_drop)
+
         needs_scaling = model_name in models_that_need_scaling
         study = optuna.create_study(direction='minimize', pruner=MedianPruner(
-            n_startup_trials=10, n_warmup_steps=5))
+            n_startup_trials=10, n_warmup_steps=3))
         obj_func = partial(
             objective,
             model_name=model_name,
@@ -331,6 +310,33 @@ def main():
 
     print("\n--- Model Comparison Results (Tuned) ---")
     print(results_df.to_string(index=False, float_format="%.4f"))
+
+
+def run_from_cached(pkl_path: Path, true_test_df: pd.DataFrame, test_game_ids: pd.Series,
+                    submission_dir: Path, train_x: pd.DataFrame, train_y: pd.Series):
+    print(f"Loading Optuna study from {pkl_path}...")
+    with open(pkl_path, 'rb') as f:
+        study = pickle.load(f)
+    model_name = 'CatBoostRegressor'
+    needs_scaling = False
+
+    print("Re-creating best model from study...")
+
+    best_model = get_model_and_params(
+        model_name, study.best_trial
+    )
+
+    pipeline = create_pipeline(best_model, needs_scaling)
+
+    print("Training model on full dataset")
+    start_time = time.time()
+    pipeline.fit(train_x, train_y)
+    print(f"Finished training in {time.time() - start_time:.2f}s.")
+
+    model_name_for_file = pkl_path.stem.replace(
+        '_pipeline', '').replace('_tuning_study', '')
+    generate_submission_file(
+        pipeline, true_test_df, test_game_ids, model_name_for_file, submission_dir)
 
 
 if __name__ == "__main__":
