@@ -95,7 +95,7 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
     raise ValueError(f"Model {model_name} not recognized for tuning.")
 
 
-def objective(trial: optuna.trial.Trial, model_name: str, needs_scaling: bool, X: pd.DataFrame, y: pd.Series, groups: pd.Series) -> float:
+def objective(trial: optuna.trial.Trial, model_name: str, needs_scaling: bool, X: pd.DataFrame, y: pd.Series, groups: pd.Series, folds: int = 5) -> float:
     """
     The Optuna objective function.
     Performs GroupKFold cross-validation and returns the mean validation RMSE.
@@ -112,7 +112,7 @@ def objective(trial: optuna.trial.Trial, model_name: str, needs_scaling: bool, X
     model = get_model_and_params(model_name, trial)
     pipeline = create_pipeline(model, needs_scaling)
 
-    gkf = GroupKFold(n_splits=5)
+    gkf = GroupKFold(n_splits=folds)
     rmses = []
     maes = []
 
@@ -172,6 +172,8 @@ def setup_args() -> argparse.Namespace:
                         help='Load models from pickle files instead of tuning.')
     parser.add_argument('--pkl_path', type=str, default='CatBoostRegressor_tuning_study 98.pkl',
                         help='Path to the pickle file for loading cached model.')
+    parser.add_argument('--folds', type=int, default=5,
+                        help='Number of folds for GroupKFold cross-validation.')
     return parser.parse_args()
 
 
@@ -247,7 +249,8 @@ def tune_train_and_save(model_name: str,
         needs_scaling=needs_scaling,
         X=train_x,
         y=train_y,
-        groups=train_groups
+        groups=train_groups,
+        folds = args.folds
     )
 
     study.optimize(obj_func, n_trials=args.n_trials,
