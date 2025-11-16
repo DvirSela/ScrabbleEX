@@ -4,3 +4,4 @@ __pycache__/
 .pylintrc
 data
 catboost_info
+.vscode
