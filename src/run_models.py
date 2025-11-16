@@ -166,7 +166,7 @@ def setup_args() -> argparse.Namespace:
     parser.add_argument('--run_fe', action='store_true',
                         help='Run feature engineering pipeline even if files exist.')
     parser.add_argument('--fe_mode', type=str, default='full',
-                        choices=['full', 'lite', 'cat'],
+                        choices=['full', 'lite','lite_cat', 'cat'],
                         help='Base mode for feature engineering: "full", "lite", or "cat".')
     parser.add_argument('--from_pkl', action='store_true',
                         help='Load models from pickle files instead of tuning.')
@@ -188,7 +188,7 @@ def load_and_prep_data(fe_mode: str, force_run_fe: bool) -> Tuple[pd.DataFrame, 
     """
     print(f"\n--- Loading and prepping data for mode: {fe_mode} ---")
 
-    if fe_mode == 'cat':
+    if fe_mode == 'cat' or fe_mode == 'lite_cat':
         train_path = DATA_DIR / 'processed' / 'train_fe_cat_no_bots.csv'
         test_path = DATA_DIR / 'processed' / 'test_fe_cat_no_bots.csv'
     else:
@@ -224,8 +224,7 @@ def tune_train_and_save(model_name: str,
 
     models_that_need_scaling = ['Ridge', 'KNeighborsRegressor']
 
-    # CatBoost needs raw categorical, other models need OHE ('full' or 'lite')
-    if model_name == 'CatBoostRegressor':
+    if model_name == 'CatBoostRegressor' and args.fe_mode != 'lite_cat':
         current_fe_mode = 'cat'
     else:
         current_fe_mode = args.fe_mode
@@ -242,7 +241,8 @@ def tune_train_and_save(model_name: str,
     needs_scaling = model_name in models_that_need_scaling
     study = optuna.create_study(direction='minimize', pruner=MedianPruner(
         n_startup_trials=10, n_warmup_steps=3))
-
+    # n_startup_trials is the number of trials before pruning starts
+    # n_warmup_steps is the number of steps before pruning starts 
     obj_func = partial(
         objective,
         model_name=model_name,

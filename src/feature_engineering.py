@@ -744,7 +744,7 @@ def build_lite_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame, 
         ('add_past_window_features', FunctionTransformer(
             lambda df: calculate_past_window_features(df, past_windows=PAST_WINDOWS_SIZES))),
         ('add_rest_of_ohe', FunctionTransformer(
-            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'rating_mode', 'lexicon']) if mode == 'full' else df)),
+            lambda df: add_ohe_to_df(df, ['time_control_name', 'game_end_reason', 'rating_mode', 'lexicon']) if mode == 'lite' else df)),
         ('drop_unused_cols', FunctionTransformer(
             lambda df: df.drop(columns=['created_at', 'day_of_week']))),
         ('add_score_margin', FunctionTransformer(add_score_margin_features)),
@@ -765,6 +765,9 @@ def run_feature_engineering(mode: str = 'full'):
     test_df = pd.read_csv(DATA_DIR / 'raw' / 'test.csv')
     if mode in ['full', 'cat']:
         fe_pipeline, turns_df = build_feature_pipeline(
+            games_df, turns_df, mode)
+    elif mode == 'lite_cat':
+        fe_pipeline, turns_df = build_lite_feature_pipeline(
             games_df, turns_df, mode)
     elif mode == 'lite':
         fe_pipeline, turns_df = build_lite_feature_pipeline(
