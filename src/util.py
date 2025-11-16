@@ -1,9 +1,11 @@
-from typing import List
+from typing import List, Any
 from pathlib import Path
 
 import pandas as pd
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 
 from src.config import SCRABBLE_LETTER_VALUES
 
@@ -158,3 +160,15 @@ def get_rack_left(rack_before: str, move: str) -> str:
         return "".join(rack_list)
     except Exception:
         return ""
+
+
+def create_pipeline(model: Any, needs_scaling: bool) -> Pipeline:
+    """
+    Creates an sklearn Pipeline, adding a StandardScaler if specified.
+    Args:
+        model (Any): The model to be used in the pipeline
+        needs_scaling (bool): Whether to include StandardScaler in the pipeline
+    """
+    if needs_scaling:
+        return Pipeline([('scaler', StandardScaler()), ('model', model)])
+    return Pipeline([('model', model)])

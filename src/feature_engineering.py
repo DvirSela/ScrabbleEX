@@ -1,4 +1,3 @@
-from collections import Counter
 import time
 from typing import List, Tuple
 from pathlib import Path
@@ -309,11 +308,11 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
     df['avg_points_per_game_rated'] = df.where(
         df['rating_mode'] == 'RATED'
     )['avg_points_per_game']
-    
+
     df['bingo_ratio_rated'] = df.where(
         df['rating_mode'] == 'RATED'
     )['bingo_ratio']
-    
+
     df['is_win_rated'] = df.where(
         df['rating_mode'] == 'RATED'
     )['is_win']
@@ -353,15 +352,16 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
 
         df[f'past_{window}_avg_bingo_ratio_rated'] = rolling_obj(
             'past_bingo_ratio_rated').mean().reset_index(level=0, drop=True).fillna(0)
-        
+
         # .sum() sums the 'past_is_win_rated' values (1s for wins, 0s for losses)
         df[f'past_{window}_num_rated_wins'] = rolling_obj('past_is_win_rated').sum(
         ).reset_index(level=0, drop=True).fillna(0).astype(int)
 
         # --- Win Rate (RATED) ---
         df[f'past_{window}_rated_win_rate'] = (
-            df[f'past_{window}_num_rated_wins'] / df[f'past_{window}_num_rated_games']
-        ).fillna(0) # fillna(0) for cases where num_rated_games is 0
+            df[f'past_{window}_num_rated_wins'] /
+            df[f'past_{window}_num_rated_games']
+        ).fillna(0)  # fillna(0) for cases where num_rated_games is 0
 
     # --- Clean up intermediate columns ---
     df = df.drop(columns=[
@@ -373,7 +373,7 @@ def calculate_past_window_features(df: pd.DataFrame, past_windows: List[int]) ->
     return df
 
 
-def went_first(df: pd.DataFrame) -> pd.DataFrame:
+def add_went_first(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds a feature indicating whether the player went first in the game.
     Args:
@@ -677,7 +677,7 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame, mode:
         ('merge_games', FunctionTransformer(
             lambda df: merge_with_another_df(df, games_df, on='game_id'))),
         ('add_casual_flag', FunctionTransformer(add_casual_only_flag)),
-        ('add_went_first', FunctionTransformer(went_first)),
+        ('add_went_first', FunctionTransformer(add_went_first)),
         ('add_avg_points', FunctionTransformer(
             lambda df: add_points_per_game_stats(df, turns_df))),
         ('add_board_letters', FunctionTransformer(
@@ -705,8 +705,6 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame, mode:
             lambda df: add_rack_value_features(df, turns_df))),
         ('add_lead_features', FunctionTransformer(
             lambda df: add_lead_features(df, turns_df))),
-        # ('add_textstat_features', FunctionTransformer(
-        #     lambda df: add_textstat_features(df, turns_df))),
         ('add_average_word_length', FunctionTransformer(
             lambda df: add_average_word_length_feature(df, turns_df))),
         ('add_first_n_moves_points', FunctionTransformer(
@@ -732,7 +730,7 @@ def build_lite_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame, 
         ('merge_games', FunctionTransformer(
             lambda df: merge_with_another_df(df, games_df, on='game_id'))),
         ('add_casual_flag', FunctionTransformer(add_casual_only_flag)),
-        ('add_went_first', FunctionTransformer(went_first)),
+        ('add_went_first', FunctionTransformer(add_went_first)),
         ('add_avg_points', FunctionTransformer(
             lambda df: add_points_per_game_stats(df, turns_df))),
         ('add_bot_type', FunctionTransformer(add_bot_type)),
@@ -765,11 +763,12 @@ def run_feature_engineering(mode: str = 'full'):
     turns_df = pd.read_csv(DATA_DIR / 'raw' / 'turns.csv')
     train_df = pd.read_csv(DATA_DIR / 'raw' / 'train.csv')
     test_df = pd.read_csv(DATA_DIR / 'raw' / 'test.csv')
-    if mode == 'full' or mode == 'cat':
+    if mode in ['full', 'cat']:
         fe_pipeline, turns_df = build_feature_pipeline(
             games_df, turns_df, mode)
     elif mode == 'lite':
-        fe_pipeline, turns_df = build_lite_feature_pipeline(games_df, turns_df)
+        fe_pipeline, turns_df = build_lite_feature_pipeline(
+            games_df, turns_df, mode)
     else:
         raise ValueError("Invalid mode. Choose 'full' or 'lite'.")
     train_df_fe = fe_pipeline.fit_transform(train_df)
@@ -785,9 +784,9 @@ def run_feature_engineering(mode: str = 'full'):
     train_no_bots = train_df_fe[~train_df_fe['nickname'].isin(BOTS)]
     test_no_bots = test_df_fe[~test_df_fe['nickname'].isin(BOTS)]
     save_processed_file(train_no_bots, DATA_DIR /
-                        'processed' / f'train_fe_cat_no_bots.csv')
+                        'processed' / 'train_fe_cat_no_bots.csv')
     save_processed_file(test_no_bots, DATA_DIR /
-                        'processed' / f'test_fe_cat_no_bots.csv')
+                        'processed' / 'test_fe_cat_no_bots.csv')
 
 
 def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = False, mode: str = 'full') -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -796,6 +795,8 @@ def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = Fa
     Args:
         train_fe_path (str): Path to train fe
         test_fe_path (str):  Path to test fe
+        force_run_fe (bool): Whether to force re-running the FE pipeline.
+        mode (str): Mode of feature engineering ('full' or 'lite').
     Returns:
         Tuple[pd.DataFrame, pd.DataFrame]: A tuple of train and test data after feature engineering
     """
@@ -821,3 +822,37 @@ def pre_process(train_fe_path: Path, test_fe_path: Path, force_run_fe: bool = Fa
     train_df_fe = train_df_fe[shared_features + ['rating']]
 
     return train_df_fe, test_df_fe
+
+
+def clean_data(train_df: pd.DataFrame, test_df: pd.DataFrame, cols_to_drop: List[str]) -> Tuple[pd.DataFrame, pd.Series,
+                                                                                                pd.DataFrame, pd.Series, pd.Series]:
+    """
+    Drops unnecessary columns and prepares X, y, and test sets.
+    Args:
+        train_df (pd.DataFrame): The training dataframe
+        test_df (pd.DataFrame): The test dataframe
+        cols_to_drop (List[str]): List of columns to drop from both dataframes
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.Series]:
+          train_x, train_y, test_df_processed, test_game_ids, train_groups
+    """
+
+    train_groups = train_df['nickname']
+    for col in cols_to_drop:
+        if col in train_df.columns:
+            train_df = train_df.drop(columns=[col])
+        if col in test_df.columns:
+            test_df = test_df.drop(columns=[col])
+
+    test_game_ids = test_df['game_id']
+
+    if 'game_id' in train_df.columns:
+        train_df = train_df.drop(columns=['game_id'])
+    if 'game_id' in test_df.columns:
+        test_df = test_df.drop(columns=['game_id'])
+
+    train_y = train_df['rating']
+    train_x = train_df.drop(columns=['rating'])
+    test_df_processed = test_df[train_x.columns]
+
+    return train_x, train_y, test_df_processed, test_game_ids, train_groups
