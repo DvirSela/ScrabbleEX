@@ -98,11 +98,12 @@ def add_points_per_game_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Da
     return df
 
 
-def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
+def add_bot_type(df: pd.DataFrame, mode: str = 'full') -> pd.DataFrame:
     """
     Adds a one hot encoded feature for bot type.
     Args:
         df (pd.DataFrame): Input dataframe with 'game_id' and 'nickname' columns.
+        mode (str): 'cat' to keep as categorical feature, otherwise adds one hot encoding.
     Returns:
         pd.DataFrame: Dataframe with new one hot encoded bot type features and 'opponent_bot_strength' column.
     """
@@ -110,8 +111,8 @@ def add_bot_type(df: pd.DataFrame) -> pd.DataFrame:
     bot_rows = df[df['nickname'].isin(BOTS)]
     bot_map = bot_rows.set_index('game_id')['nickname']
     df.loc[:, 'opponent_bot'] = df['game_id'].map(bot_map)
-    df = add_ohe_to_df(df, ['opponent_bot'])
-
+    if 'cat' not in mode:
+        df = add_ohe_to_df(df, ['opponent_bot'])
     return df
 
 
@@ -153,17 +154,19 @@ def add_time_related_features(df: pd.DataFrame, timestamp_col='created_at') -> p
     return df
 
 
-def add_game_variant_feature(df: pd.DataFrame) -> pd.DataFrame:
+def add_game_variant_feature(df: pd.DataFrame, mode: str = 'full') -> pd.DataFrame:
     """
     Adds one hot encoded features for a new game_variant feature: f'{Lexicon} - {time_control_name}'
     Args:
         df (pd.DataFrame): Input dataframe with 'lexicon' and 'time_control_name' columns.
+        mode (str): 'cat' to keep as categorical feature, otherwise adds one hot encoding.
     Return:
         pd.DataFrame: Dataframe with new one hot encoded game_variant features.
     """
     df = df.copy()
     df['game_variant'] = df['lexicon'] + ' - ' + df['time_control_name']
-    df = add_ohe_to_df(df, ['game_variant'])
+    if 'cat' not in mode:
+        df = add_ohe_to_df(df, ['game_variant'])
     return df
 
 
@@ -258,7 +261,8 @@ def add_overall_player_stats(df: pd.DataFrame, turns_df: pd.DataFrame) -> pd.Dat
     Returns:
         pd.DataFrame: Dataframe with new overall player statistics features.
     """
-    df = df.copy()
+    # TODO maybe make it so that this feature only considers RATED games?
+    df = df.copy() 
     overall_stats = turns_df.groupby('nickname')['points'].agg(
         total_games_played='count',
         overall_avg_points='mean',
@@ -682,10 +686,12 @@ def build_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame, mode:
             lambda df: add_points_per_game_stats(df, turns_df))),
         ('add_board_letters', FunctionTransformer(
             lambda df: add_board_letters_used(df, turns_df))),
-        ('add_bot_type', FunctionTransformer(add_bot_type)),
+        ('add_bot_type', FunctionTransformer(
+            lambda df: add_bot_type(df, mode=mode))),
         ('add_time_features', FunctionTransformer(
             lambda df: add_time_related_features(df, 'created_at'))),
-        ('add_game_variant', FunctionTransformer(add_game_variant_feature)),
+        ('add_game_variant', FunctionTransformer(
+            lambda df: add_game_variant_feature(df, mode=mode))),
         ('add_number_of_bingos', FunctionTransformer(
             lambda df: add_bingo_proxy_feature(df, turns_df))),
         ('add_turn_type_counts', FunctionTransformer(
@@ -733,10 +739,12 @@ def build_lite_feature_pipeline(games_df: pd.DataFrame, turns_df: pd.DataFrame, 
         ('add_went_first', FunctionTransformer(add_went_first)),
         ('add_avg_points', FunctionTransformer(
             lambda df: add_points_per_game_stats(df, turns_df))),
-        ('add_bot_type', FunctionTransformer(add_bot_type)),
+        ('add_bot_type', FunctionTransformer(
+            lambda df: add_bot_type(df, mode=mode))),
         ('add_time_features', FunctionTransformer(
             lambda df: add_time_related_features(df, 'created_at'))),
-        ('add_game_variant', FunctionTransformer(add_game_variant_feature)),
+        ('add_game_variant', FunctionTransformer(
+            lambda df: add_game_variant_feature(df, mode=mode))),
         ('add_number_of_bingos', FunctionTransformer(
             lambda df: add_bingo_proxy_feature(df, turns_df))),
         ('add_overall_player_stats', FunctionTransformer(

@@ -19,7 +19,7 @@ from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 
-from .config import DATA_DIR, SEED, N_TRIALS
+from .config import DATA_DIR, SEED, N_TRIALS, MODELS_NEEDING_SCALING, CASUAL_THRESHOLD
 from .feature_engineering import pre_process, clean_data
 from .util import remove_casual_only_players, create_pipeline
 
@@ -77,7 +77,7 @@ def get_model_and_params(model_name: str, trial: optuna.trial.Trial) -> Any:
         }
         cat_features_list = [
             'time_control_name', 'game_end_reason', 'rating_mode',
-            'lexicon'
+            'lexicon', 'game_variant', 'opponent_bot'
         ]
         return CatBoostRegressor(**params, random_state=SEED, verbose=0, thread_count=-1, cat_features=cat_features_list)
 
@@ -166,7 +166,7 @@ def setup_args() -> argparse.Namespace:
     parser.add_argument('--run_fe', action='store_true',
                         help='Run feature engineering pipeline even if files exist.')
     parser.add_argument('--fe_mode', type=str, default='full',
-                        choices=['full', 'lite','lite_cat', 'cat'],
+                        choices=['full', 'lite', 'lite_cat', 'cat'],
                         help='Base mode for feature engineering: "full", "lite", or "cat".')
     parser.add_argument('--from_pkl', action='store_true',
                         help='Load models from pickle files instead of tuning.')
@@ -242,7 +242,7 @@ def tune_train_and_save(model_name: str,
     study = optuna.create_study(direction='minimize', pruner=MedianPruner(
         n_startup_trials=10, n_warmup_steps=3))
     # n_startup_trials is the number of trials before pruning starts
-    # n_warmup_steps is the number of steps before pruning starts 
+    # n_warmup_steps is the number of steps before pruning starts
     obj_func = partial(
         objective,
         model_name=model_name,
@@ -250,7 +250,7 @@ def tune_train_and_save(model_name: str,
         X=train_x,
         y=train_y,
         groups=train_groups,
-        folds = args.folds
+        folds=args.folds
     )
 
     study.optimize(obj_func, n_trials=args.n_trials,
@@ -330,7 +330,8 @@ def run_cached_workflow(args: argparse.Namespace):
     print("Running from cached model pipelines...")
 
     train_df, true_test_df = load_and_prep_data(
-        fe_mode='cat', force_run_fe=args.run_fe
+        fe_mode='cat' if 'CatBoostRegressor' in args.pkl_path else args.fe_mode,
+        force_run_fe=args.run_fe
     )
 
     cols_to_drop = ['nickname', 'first']
@@ -362,8 +363,8 @@ def run_from_cached(pkl_path: Path, true_test_df: pd.DataFrame, test_game_ids: p
     print(f"Loading Optuna study from {pkl_path}...")
     with open(pkl_path, 'rb') as f:
         study = pickle.load(f)
-    model_name = 'CatBoostRegressor'
-    needs_scaling = False
+    model_name = pkl_path.stem.split('_')[0]
+    needs_scaling = model_name in MODELS_NEEDING_SCALING
 
     print("Re-creating best model from study...")
 
