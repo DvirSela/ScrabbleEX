@@ -12,3 +12,5 @@ SCRABBLE_LETTER_VALUES = {
     '?': 0
 }
 N_TRIALS = 50
+MODELS_NEEDING_SCALING = ['Ridge', 'KNeighborsRegressor']
+CASUAL_THRESHOLD = 0.92

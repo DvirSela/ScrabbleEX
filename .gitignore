@@ -5,3 +5,4 @@ __pycache__/
 data
 catboost_info
 .vscode
+.ipynb_checkpoints

@@ -137,6 +137,30 @@ def remove_casual_only_players(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def remove_casual_only_players_by_threshold(df: pd.DataFrame, casual_threshold: float = 0.95) -> pd.DataFrame:
+    """
+    Removes all rows for players whose proportion of casual games exceeds the specified threshold.
+    Args:
+        df (pd.DataFrame): Input dataframe with 'player_id' and 'is_casual' columns.
+        casual_threshold (float): Proportion threshold to identify casual-only players.
+    Returns:
+        pd.DataFrame: Dataframe with casual-only players filtered out.
+    """
+    df = df.copy()
+    player_game_counts = df.groupby(
+        'nickname')['rating_mode'].value_counts().unstack(fill_value=0)
+    player_game_counts['total_games'] = player_game_counts.sum(axis=1)
+    player_game_counts['casual_percentage'] = player_game_counts['CASUAL'] / \
+        player_game_counts['total_games']
+    casual_only_players = player_game_counts[player_game_counts['casual_percentage']
+                                             > casual_threshold].index
+    initial_rows = df.shape[0]
+    df = df[~df['nickname'].isin(casual_only_players)].reset_index(drop=True)
+    rows_removed = initial_rows - df.shape[0]
+    print(f"Removed {rows_removed} rows belonging to players exceeding casual game threshold of {casual_threshold:.2f}.")
+    return df
+
+
 def get_rack_left(rack_before: str, move: str) -> str:
     """
     Helper function to calculate the tiles left on the rack after a move.
